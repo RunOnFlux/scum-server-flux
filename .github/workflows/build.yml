@@ -1,0 +1,128 @@
+name: Test, build and publish
+
+# The game is not in the image (SteamCMD installs it on the first start), so there is no upstream
+# release to follow: a push to main publishes. Publishing :latest DOES reach running servers:
+# FluxOS's image update service checks every app's tag every six hours and soft-redeploys onto a
+# new image, which restarts the server with no warning in game. Hence the image test before the
+# push, and the check before a scheduled build: it publishes only when there is something to apply
+# (.github/ci/needs-rebuild.sh), since even a rebuild of unchanged inputs gets a new digest.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    # Mondays: a check, and a build only when needs-rebuild.sh finds something to apply: an urgent
+    # security update, commits on main (touching the image inputs) the published image does not have,
+    # or, on the first Monday of the month, anything else.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: runonflux/scum-server-flux
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Syntax
+        run: |
+          for f in scripts/*.sh tests/*.sh tests/image/*.sh; do bash -n "$f"; done
+          python3 -m py_compile scripts/fluxscum.py
+
+      # Pinned, so "shellcheck is clean on my machine" means the same thing here.
+      - name: Shellcheck
+        run: docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable -x scripts/*.sh tests/*.sh tests/image/*.sh .github/ci/*.sh
+
+      - name: Unit tests
+        run: ./tests/test-flux.sh
+
+      - name: Version is a version
+        run: grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' VERSION
+
+  # Is there anything to publish? Always yes for a push or a manual run; for the scheduled run, see
+  # .github/ci/needs-rebuild.sh. Also resolves the base digest the build pins.
+  check:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+      base: ${{ steps.check.outputs.base }}
+      base_digest: ${{ steps.check.outputs.base_digest }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The check compares the published image's revision label with this history.
+          fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@v3
+
+      - id: check
+        run: |
+          base="$(sed -n 's/^ARG BASE_IMAGE=//p' Dockerfile)"
+          echo "base=${base}" >>"$GITHUB_OUTPUT"
+          .github/ci/needs-rebuild.sh "${IMAGE_NAME}" "${base}"
+
+  build:
+    needs: [test, check]
+    # A pull request gets the tests and nothing else: it must not publish. A scheduled run with
+    # nothing new stops at the check.
+    if: github.event_name != 'pull_request' && needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Version
+        run: echo "VERSION=$(tr -d '[:space:]' <VERSION)" >>"$GITHUB_ENV"
+
+      # Built and loaded first, tested, and then THAT image is pushed: :latest must never be an
+      # image the tests have not run in (the first one published could not unpack a mod,
+      # python3-minimal). No second build for the push, which could miss the cache and differ.
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          build-args: |
+            FLUX_IMAGE_VERSION=${{ env.VERSION }}
+            BASE_IMAGE=${{ needs.check.outputs.base }}@${{ needs.check.outputs.base_digest }}
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.base.name=${{ needs.check.outputs.base }}
+            org.opencontainers.image.base.digest=${{ needs.check.outputs.base_digest }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test the image
+        run: ./tests/test-image.sh "${IMAGE_NAME}:${{ github.sha }}"
+
+      # A version tag is written once. A later run on the same VERSION (the weekly rebuild, or a
+      # change that forgot to bump it) moves :latest and adds its commit tag, never rewrites
+      # :<VERSION>, so a server pinned to a version keeps exactly that image.
+      - name: Push the tested image
+        run: |
+          set -euo pipefail
+          tested="${IMAGE_NAME}:${{ github.sha }}"
+          tags=(latest "${{ github.sha }}")
+          if docker manifest inspect "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1; then
+            echo "::warning::${IMAGE_NAME}:${VERSION} already exists and is not rewritten; bump VERSION to publish a new version tag"
+          else
+            tags+=("${VERSION}")
+          fi
+          for tag in "${tags[@]}"; do
+            docker tag "${tested}" "${IMAGE_NAME}:${tag}"
+            docker push "${IMAGE_NAME}:${tag}"
+          done
