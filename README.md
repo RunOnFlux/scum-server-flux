@@ -84,9 +84,9 @@ float, time `HH:MM:SS`, text) and refused as a whole if one is wrong. Run `flux-
   (`violation` is accepted). An unknown kind answers `{"ok": false, "error", "kinds": [...]}` with exit 1.
 - **`backup <label> [force]`** answers ONE JSON document and nothing else. Made: `{"ok": true, "name", "size", "why",
   "keep"}`. Not made on purpose (nothing saved yet, or the newest is under 60 minutes old and it is not forced):
-  `{"ok": false, "skipped": true, "error"}`. Failed: `{"ok": false, "error"}`. Not ok exits 1. `force` skips the age rule
-  and the backup is kept (never pruned), like the ones made before a restore: use it for a safety backup before a
-  wipe. (The supervisor's own backups use the internal `backup-plain`, which prints the `# ` log lines.)
+  `{"ok": false, "skipped": true, "error"}`. Failed: `{"ok": false, "error"}`. Not ok exits 1. `force` skips the age rule;
+  a label starting with `before` is also kept (never pruned), like the ones made before a restore: use `before wipe`
+  for a safety backup before a wipe. A forced backup with another label is pruned like any other. (The supervisor's own backups use the internal `backup-plain`, which prints the `# ` log lines.)
 - **`restore-mark [label]`** (or the file `flux/restore-marker.json`, `{"time": epoch, "label": text}`): see "A restore from outside".
 
 ## The save
@@ -154,7 +154,7 @@ client** (none was available), so the image does not default to it: `SCUM_BATTLE
 
 ## Versions
 
-- 1.0.1: `db-guard` honours a restore (marker) and tells a failover, a split-brain and a stale/older snapshot apart; backup/restore temp dirs on the install volume; `backup` answers one JSON document and `force` keeps the backup; new verbs `list-add`, `list-remove`, `gamelog`, `restore-mark`; `status` carries `imageVersion`, `verbs`, `capabilities`, `saveGuard`.
+- 1.0.1: `db-guard` honours a restore (marker) and tells a failover, a split-brain and a stale/older snapshot apart; backup/restore temp dirs on the install volume; `backup` answers one JSON document and `force` skips the 60-minute rule (a `before...` label keeps the backup); new verbs `list-add`, `list-remove`, `gamelog`, `restore-mark`; `status` carries `imageVersion`, `verbs`, `capabilities`, `saveGuard`.
 - 1.0.0 (2026-10-29): first release. The game's own database copies and logs are pruned at every start (it deletes none); its logs are read as UTF-16LE.
 
 ## Measured

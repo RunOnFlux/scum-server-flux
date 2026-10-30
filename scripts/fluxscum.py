@@ -21,7 +21,7 @@
     flux-scum restart               stop and start the server again (applies the above)
     flux-scum backups               the backups in flux/backups (name, size, date, why)
     flux-scum gamelog <kind> [lines]  the tail of the game's own log (admin, chat, kill, ...): {ok, kind, files, lines}
-    flux-scum backup <why> [force]  a backup now: ONE JSON document {ok, name, size, ...} (force skips the age rule and keeps it)
+    flux-scum backup <why> [force]  a backup now: ONE JSON document {ok, name, size, ...} (force skips the age rule; a label starting "before" is also kept)
     flux-scum restore-mark [label]  tell the next start that the synced SCUM.db + snapshot.json were put there on purpose
     flux-scum restore <backup>      restore one on the next start (the server is restarted now)
     flux-scum import-save <db>      a SCUM.db brought from another server, restored on the next start
@@ -1233,8 +1233,8 @@ def make_backup(why, force=False):
     """Returns (result, note). result is the JSON the panel reads: {ok, name, size, why, keep} when a backup
     was made, {ok: false, skipped: true, error} when nothing was done on purpose (nothing saved yet, or the
     newest is under FLUX_BACKUP_MIN_AGE_MINUTES old and this is not forced), {ok: false, error} when it
-    failed. note is the "# " line for the supervisor's log. A forced backup skips the age rule and is kept
-    (never pruned), like the ones made before a restore."""
+    failed. note is the "# " line for the supervisor's log. A forced backup skips the age rule; only a label
+    starting with "before" (a safety backup, like the one made before a restore) is kept and never pruned."""
     why = clean_label(why)
     source = LIVE_DB if os.path.isfile(LIVE_DB) else (SNAP_DB if os.path.isfile(SNAP_DB) else None)
     if source is None:
@@ -1278,7 +1278,7 @@ def make_backup(why, force=False):
         return {"ok": False, "error": f"The backup failed: {e}"}, f"# WARN backup failed: {e}"
     shutil.rmtree(tmpdb, ignore_errors=True)
     os.replace(path + ".part", path)
-    keep = why.startswith("before") or force
+    keep = why.startswith("before")
     with locked():
         index = load_index()
         state = load_state()

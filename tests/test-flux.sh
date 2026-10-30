@@ -257,15 +257,16 @@ check "a path outside the uploads is refused" "1" "$(status scum import-save /et
 # Backups: one JSON document, forced ones kept, temp dirs on the install volume.
 check "a backup answers ONE JSON document with its name" "1" "$(scum backup json force | python3 -c 'import json,sys; d=json.load(sys.stdin); print(1 if d["ok"] and d["name"].endswith("-scum.tar.gz") and d["size"] > 0 else 0)')"
 check "and nothing on stderr" "" "$(scum backup quiet force 2>&1 >/dev/null)"
-check "a forced backup is kept" "True" "$(scum backup safety force | jget keep)"
+check "a forced backup with a before label is kept" "True" "$(scum backup 'before safety' force | jget keep)"
 check "and marked kept in the list" "True" "$(scum backups | jget backups.0.keep)"
+check "a forced backup without it is not kept (a manual one must not pile up)" "False" "$(scum FLUX_BACKUP_MIN_AGE_MINUTES=0 backup manual force | jget keep)"
 check "an unforced one under the age rule is skipped, ok false, skipped true" "False True" "$(scum backup again | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["ok"], d["skipped"])')"
 check "and exits 1 like fail()" "1" "$(status scum backup again)"
 check "the supervisor's backup keeps the plain line" "1" "$(scum FLUX_BACKUP_MIN_AGE_MINUTES=0 backup-plain plainline | grep -c '^# backup .*plainline')"
 sleep 1
 scum FLUX_BACKUP_MIN_AGE_MINUTES=0 FLUX_BACKUP_KEEP=1 backup-plain rot1 >/dev/null; sleep 1
 scum FLUX_BACKUP_MIN_AGE_MINUTES=0 FLUX_BACKUP_KEEP=1 backup-plain rot2 >/dev/null
-check "forced backups survive pruning" "1" "$(scum backups | python3 -c 'import json,sys; print(sum(1 for b in json.load(sys.stdin)["backups"] if b["why"]=="safety" and b["keep"]))')"
+check "before-labelled backups survive pruning" "1" "$(scum backups | python3 -c 'import json,sys; print(sum(1 for b in json.load(sys.stdin)["backups"] if b["why"]=="before safety" and b["keep"]))')"
 check "an ordinary one is pruned" "0" "$(scum backups | python3 -c 'import json,sys; print(sum(1 for b in json.load(sys.stdin)["backups"] if b["why"]=="rot1"))')"
 check "the label is one short line" "a b" "$(scum backup $'a\nb' force | jget why)"
 check "backup and restore make their temp dirs on the install volume, never on the synced one" "ok" "$(FLUX_DATA_DIR="${data}" FLUX_SERVER_DIR="${server}" python3 - "${server}" "${data}" <<'PY'
