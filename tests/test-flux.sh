@@ -193,11 +193,22 @@ check "and is remembered" "1" "$([ -f "${data}/flux/db-seen.json" ] && echo 1)"
 check "the guard keeps the live database" "0" "$(status scum db-guard)"
 rm -f "${live}" "${live}-wal" "${live}-shm"
 check "a new node starts from the snapshot" "1" "$(scum db-guard >/dev/null; dbrows "${live}")"
-mkdb "${live}" 2
-touch -d '2026-10-28 09:00:00' "${live}" "${live}-wal" 2>/dev/null
-scum snapshot >/dev/null
-check "a snapshot much newer than the live save (another node ran) wins" "2" "$(touch -d '2020-01-01' "${live}"; rm -f "${live}-wal" "${live}-shm"; scum db-guard >/dev/null; dbrows "${live}")"
+# Another node (its own install volume, the same synced data volume) runs the server and snapshots.
+server2="${tmp}/server2"
+mkdir -p "${server2}/SCUM/Saved/SaveFiles"
+scum2() { NODE_DIR="${server2}" scum "$@"; }
+scum() { # VAR=value... command args: fluxscum.py with exactly these variables
+  local vars=()
+  while [[ "${1:-}" == *=* ]]; do vars+=("$1"); shift; done
+  env -i PATH="${PATH}" HOME="${tmp}" FLUX_DATA_DIR="${data}" FLUX_SERVER_DIR="${NODE_DIR:-${server}}" \
+    FLUX_RESTART_MARKER="${tmp}/restart-marker" "${vars[@]}" python3 scripts/fluxscum.py "$@"
+}
+mkdb "${server2}/SCUM/Saved/SaveFiles/SCUM.db" 2
+sleep 2
+scum2 snapshot >/dev/null
+check "a snapshot written by another node, newer than ours, our save untouched since: failover, it wins" "2" "$(scum db-guard >/dev/null; dbrows "${live}")"
 check "and the replaced copy is kept" "1" "$(find "${server}/flux-replaced" -type f | wc -l | tr -d ' ')"
+check "and the next start finds it adopted (own)" "own" "$(scum db-guard >/dev/null; jget decision <"${data}/flux/save-guard.json")"
 mkdb "${live}" 3
 check "a newer live save beats the snapshot" "3" "$(scum db-guard >/dev/null; dbrows "${live}")"
 printf 'garbage' >"${live}"
@@ -237,6 +248,39 @@ python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("creat
 check "an SQLite file that is not a SCUM save is refused" "1" "$(status scum import-save "${data}/flux/uploads/other.db")"
 check "a path outside the uploads is refused" "1" "$(status scum import-save /etc/passwd)"
 
+# Backups: one JSON document, forced ones kept, temp dirs on the install volume.
+check "a backup answers ONE JSON document with its name" "1" "$(scum backup json force | python3 -c 'import json,sys; d=json.load(sys.stdin); print(1 if d["ok"] and d["name"].endswith("-scum.tar.gz") and d["size"] > 0 else 0)')"
+check "and nothing on stderr" "" "$(scum backup quiet force 2>&1 >/dev/null)"
+check "a forced backup is kept" "True" "$(scum backup safety force | jget keep)"
+check "and marked kept in the list" "True" "$(scum backups | jget backups.0.keep)"
+check "an unforced one under the age rule is skipped, ok false, skipped true" "False True" "$(scum backup again | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["ok"], d["skipped"])')"
+check "and exits 1 like fail()" "1" "$(status scum backup again)"
+check "the supervisor's backup keeps the plain line" "1" "$(scum FLUX_BACKUP_MIN_AGE_MINUTES=0 backup-plain plainline | grep -c '^# backup .*plainline')"
+sleep 1
+scum FLUX_BACKUP_MIN_AGE_MINUTES=0 FLUX_BACKUP_KEEP=1 backup-plain rot1 >/dev/null; sleep 1
+scum FLUX_BACKUP_MIN_AGE_MINUTES=0 FLUX_BACKUP_KEEP=1 backup-plain rot2 >/dev/null
+check "forced backups survive pruning" "1" "$(scum backups | python3 -c 'import json,sys; print(sum(1 for b in json.load(sys.stdin)["backups"] if b["why"]=="safety" and b["keep"]))')"
+check "an ordinary one is pruned" "0" "$(scum backups | python3 -c 'import json,sys; print(sum(1 for b in json.load(sys.stdin)["backups"] if b["why"]=="rot1"))')"
+check "the label is one short line" "a b" "$(scum backup $'a\nb' force | jget why)"
+check "backup and restore make their temp dirs on the install volume, never on the synced one" "ok" "$(FLUX_DATA_DIR="${data}" FLUX_SERVER_DIR="${server}" python3 - "${server}" "${data}" <<'PY'
+import sys, tempfile, contextlib, io
+sys.path.insert(0, "scripts")
+import fluxscum
+made = []
+real = tempfile.mkdtemp
+def spy(*a, **k):
+    d = real(*a, **k); made.append(d); return d
+tempfile.mkdtemp = spy
+res, _ = fluxscum.make_backup("spy", force=True)
+assert res["ok"], res
+with contextlib.redirect_stdout(io.StringIO()):
+    fluxscum.restore_backup_db({"name": res["name"]})
+server, data = sys.argv[1:3]
+assert len(made) == 2 and all(d.startswith(server + "/.flux-") for d in made), made
+print("ok")
+PY
+)"
+
 # Players: the save's table, and the game's login log. THE GAME'S LOGS ARE UTF-16LE (measured, no BOM).
 mkdir -p "${saved}/SaveFiles/Logs"
 python3 - "${saved}/SaveFiles/Logs/login_20261028100000.log" <<'PY'
@@ -270,7 +314,66 @@ check "and they are the newest" "20261001000005" "$(find "${saved}/SaveFiles" -m
 check "old logs are removed, keeping the newest three of a kind" "3" "$(find "${saved}/SaveFiles/Logs" -name 'chat_*.log' | wc -l | tr -d ' ')"
 check "a log newer than the cutoff is kept" "1" "$(find "${saved}/SaveFiles/Logs" -name 'login_20261028100000.log' | wc -l | tr -d ' ')"
 
+# Lists: one id at a time, under a lock.
+adm="${data}/Config/WindowsServer/AdminUsers.ini"
+printf '76561198000000001[SetGodMode]\r\n' >"${adm}"
+check "list-add adds one id" "True 2" "$(scum list-add admins 76561198000000020 | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["changed"], d["count"])')"
+check "and keeps another id's permission suffix" "76561198000000001[SetGodMode]" "$(tr -d '\r' <"${adm}" | head -1)"
+check "and the game's line endings" "2" "$(grep -c $'\r' "${adm}")"
+sum="$(md5sum <"${adm}")"
+check "adding an id that is there is ok, unchanged, file untouched" "False $sum" "$(scum list-add admins 76561198000000020 | jget changed) $(md5sum <"${adm}")"
+check "a profile link is accepted" "True" "$(scum list-add admins https://steamcommunity.com/profiles/76561198000000021 | jget changed)"
+check "a bad id is refused" "1" "$(status scum list-add admins nope)"
+check "an unknown list is refused" "64" "$(status scum list-add nothing 76561198000000020)"
+check "list-remove removes one" "True" "$(scum list-remove admins 76561198000000021 | jget changed)"
+check "and keeps the others' suffix" "76561198000000001[SetGodMode]" "$(tr -d '\r' <"${adm}" | head -1)"
+check "removing an absent id is ok, unchanged" "False" "$(scum list-remove admins 76561198000000099 | jget changed)"
+: >"${data}/Config/WindowsServer/WhitelistedUsers.ini"
+for i in 1 2 3 4 5 6 7 8; do scum list-add whitelist "$(printf '7656119%010d' "${i}")" >/dev/null & done
+wait
+check "eight concurrent list-add calls lose nothing" "8" "$(scum list whitelist | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["entries"]))')"
+
+# The game's own logs: kinds, tail, UTF-16LE, caps.
+python3 - "${saved}/SaveFiles/Logs" <<'PY'
+import sys, os
+d = sys.argv[1]
+def w(name, lines, enc="utf-16-le"):
+    open(os.path.join(d, name), "wb").write(("\r\n".join(lines) + "\r\n").encode(enc))
+w("admin_20261028100000.log", [f"2026.10.28-10.00.0{i}: cmd {i}" for i in range(5)])
+w("admin_20261028110000.log", ["2026.10.28-11.00.00: new file line a", "2026.10.28-11.00.01: new file line b éü"])
+w("violations_20261028100000.log", ["2026.10.28-10.00.00: violation one"])
+w("chat_20261028100000.log", ["2026.10.28-10.00.00: chat one"], "utf-8")
+w("famepoints_20261028100000.log", ["2026.10.28-10.00.00: fame one"])
+with open(os.path.join(d, "big_20261028100000.log"), "wb") as f:
+    f.write("\r\n".join(f"line {i:05d} ééééé" for i in range(5000)).encode("utf-16-le"))
+PY
+check "gamelog returns the last lines across files, oldest first" "cmd 4|new file line a|new file line b éü" "$(scum gamelog admin 3 | python3 -c 'import json,sys; d=json.load(sys.stdin); print("|".join(l.split(": ",1)[1] for l in d["lines"]))')"
+check "with the files it read, oldest first" "admin_20261028100000.log admin_20261028110000.log" "$(scum gamelog admin 7 | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["files"]))')"
+check "UTF-16LE is decoded (no NULs)" "0" "$(scum gamelog admin | grep -c '\\u0000')"
+check "an alias: violation is violations" "violations" "$(scum gamelog violation | jget kind)"
+check "a UTF-8 log is read too" "1" "$(scum gamelog chat | jget count)"
+check "a kind that only exists on disk works" "1" "$(scum gamelog famepoints | jget count)"
+check "a known kind with no file is empty, not an error" "0" "$(scum gamelog kill | jget count)"
+check "an unknown kind lists the kinds" "False 1 1" "$(scum gamelog nothing | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["ok"], int("chat" in d["kinds"]), int("famepoints" in d["kinds"]))')"
+check "and exits 1" "1" "$(status scum gamelog nothing)"
+check "a kind cannot be a path" "1" "$(status scum gamelog ../../etc/passwd)"
+check "the lines are capped at 2000" "2000" "$(scum gamelog big 999999 | jget count)"
+check "and the bytes are capped, dropping the oldest" "True" "$(scum gamelog big 2000 | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(len(l.encode()) + 1 for l in d["lines"]) <= 512*1024 and d["lines"][-1].startswith("line 04999"))')"
+check "a byte cap with an odd tail still decodes whole lines" "ok" "$(python3 - "${saved}/SaveFiles/Logs/big_20261028100000.log" <<'PY'
+import re, sys
+sys.path.insert(0, "scripts")
+import fluxscum
+for cap in (1001, 1002, 4097, 777):
+    text = fluxscum.read_game_log(sys.argv[1], max_bytes=cap)
+    lines = [l for l in text.split("\n") if l.strip()]
+    assert lines and all(re.fullmatch(r"line \d{5} é{5}\r?", l) for l in lines), (cap, lines[:2])
+    assert len(text.encode("utf-16-le")) <= cap + 2, cap
+print("ok")
+PY
+)"
+
 # Status and restart.
+check "status names the image version and what it can do" "True" "$(scum FLUX_IMAGE_VERSION=1.0.1 status | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["imageVersion"]=="1.0.1" and all(c in d["capabilities"] for c in ("list-add","list-remove","gamelog","backup-json","restore-marker")) and "gamelog" in d["verbs"])')"
 check "status carries the build" "24343458" "$(scum status | jget build)"
 check "and the state" "running" "$(scum status | jget state)"
 check "a restart is a marker" "0" "$(status scum restart)"
@@ -307,6 +410,96 @@ check "an old flux.log is appended to the new one" "new 1 old 1 old 2" "$(tr '\n
 check "and deleted from the data volume" "1" "$(status test -e "${lt}/old.log")"
 check "migrating with nothing to migrate is harmless" "0" "$(FLUX_LOG="${lt}/mig.log" status flux_log_migrate "${lt}/old.log")"
 rm -rf "${lt}"
+
+# --- db-guard decision table: the node is "server", another node is "server2", the data volume is shared.
+data="${tmp}/dg-data"
+server="${tmp}/dg-s1"
+server2="${tmp}/dg-s2"
+saved="${server}/SCUM/Saved"
+live="${saved}/SaveFiles/SCUM.db"
+snap="${data}/SaveFiles/SCUM.db"
+dgnew() { # this node ran and snapshotted (live 10); R = the time of its last snapshot
+  rm -rf "${data}" "${server}" "${server2}"
+  mkdir -p "${server}/SCUM/Saved/SaveFiles" "${server2}/SCUM/Saved/SaveFiles"
+  mkdb "${live}" 10
+  scum snapshot >/dev/null
+  R="$(jget time <"${server}/flux-snapshot-local.json")"
+}
+mksnap() { mkdb "${snap}" "$1"; }
+setmeta() { # node(OWN|OTHER|NONE) delta [size]: snapshot.json as that writer would have left it
+  python3 - "${data}/SaveFiles" "${R}" "$1" "$2" "${3:-}" "${server}/flux-node-id" <<'PY'
+import json, os, sys
+d, base, who, delta, size, idfile = sys.argv[1:7]
+meta = {"time": int(base) + int(delta), "size": int(size) if size else os.path.getsize(os.path.join(d, "SCUM.db")), "image": "t"}
+if who != "NONE":
+    meta["node"] = open(idfile).read().strip() if who == "OWN" else "othernode0123"
+    meta["write"] = "w" + delta.replace("-", "m")
+json.dump(meta, open(os.path.join(d, "snapshot.json"), "w"))
+PY
+}
+nrep() { find "${server}/flux-replaced" -type f 2>/dev/null | wc -l | tr -d ' '; }
+anyrep() { dbrows "$(find "${server}/flux-replaced" -type f | head -1)"; }
+decision() { jget decision <"${data}/flux/save-guard.json"; }
+
+dgnew
+check "own snapshot: live kept" "10 own 0" "$(scum db-guard >/dev/null; echo "$(dbrows "${live}") $(decision) $(nrep)")"
+dgnew; mksnap 20; setmeta OTHER 1000
+check "newer foreign (failover): the snapshot is used" "20 failover" "$(scum db-guard >/dev/null; echo "$(dbrows "${live}") $(decision)")"
+check "and the replaced copy (live 10) is kept" "1 10" "$(nrep) $(anyrep)"
+check "and the panel can see it" "True" "$(jget notice <"${data}/flux/save-guard.json")"
+check "status shows the decision" "failover" "$(scum status | jget saveGuard.decision)"
+dgnew; mksnap 30; setmeta OTHER -1000
+check "older foreign (restore or stale sync) without a marker: live kept" "10 older-snapshot" "$(scum db-guard >/dev/null; echo "$(dbrows "${live}") $(decision)")"
+check "the older snapshot is kept in flux-replaced" "1 30" "$(nrep) $(anyrep)"
+check "the stop snapshot that follows does not lose it nor duplicate it" "1 30 10" "$(scum snapshot >/dev/null; echo "$(nrep) $(anyrep) $(dbrows "${snap}")")"
+dgnew; mksnap 30; setmeta OWN -1000
+check "an older snapshot with this node's own id (a restored backup of this node) is not own either" "10 older-snapshot" "$(scum db-guard >/dev/null; echo "$(dbrows "${live}") $(decision)")"
+dgnew; mksnap 30; setmeta OTHER -1000; scum restore-mark "hub restore" >/dev/null
+check "restore marker: the stop snapshot does not overwrite the restored files" "30" "$(scum snapshot >/dev/null; dbrows "${snap}")"
+check "and the next start uses them" "30 restore-marker" "$(scum db-guard >/dev/null; echo "$(dbrows "${live}") $(decision)")"
+check "the marker is consumed" "1" "$(status test -e "${data}/flux/restore-marker.json")"
+check "this node's copy is kept" "1 10" "$(nrep) $(anyrep)"
+check "the restore is reported" "True" "$(jget ok <"${data}/flux/last-restore.json")"
+check "and the next start has nothing to decide" "own" "$(scum db-guard >/dev/null; decision)"
+dgnew; mksnap 30; setmeta OTHER -1000; rm -f "${data}/SaveFiles/snapshot.json"; scum restore-mark >/dev/null
+check "a marker whose files have not all arrived waits" "1" "$(status scum db-guard)"
+check "and says so" "1" "$(scum db-guard | grep -c 'Waiting for the restored save')"
+check "after the grace it gives up, keeps live, reports a failed restore" "0 10 False" "$(scum FLUX_DB_SYNC_GRACE_SECONDS=0 db-guard >/dev/null; echo "$? $(dbrows "${live}") $(jget ok <"${data}/flux/last-restore.json")")"
+check "and removes the marker" "1" "$(status test -e "${data}/flux/restore-marker.json")"
+dgnew; mksnap 40; setmeta OTHER 500; touch -d "@$((R + 1000))" "${live}"
+check "split-brain, live changed later than the snapshot: live is used" "10 split-brain" "$(scum db-guard >/dev/null; echo "$(dbrows "${live}") $(decision)")"
+check "and the other copy is kept" "1 40" "$(nrep) $(anyrep)"
+dgnew; mksnap 40; setmeta OTHER 2000; touch -d "@$((R + 1000))" "${live}"
+check "split-brain, snapshot later than live: the snapshot is used" "40 split-brain" "$(scum db-guard >/dev/null; echo "$(dbrows "${live}") $(decision)")"
+check "and this node's copy is kept" "1 10" "$(nrep) $(anyrep)"
+dgnew; mksnap 20; setmeta OTHER 1000 123
+check "meta/DB size mismatch: the snapshot is not trusted, live kept" "10 snapshot-untrusted 0" "$(scum db-guard >/dev/null; echo "$(dbrows "${live}") $(decision) $(nrep)")"
+rm -f "${live}" "${live}-wal" "${live}-shm"
+check "and with no live save it waits instead of starting a new world" "1" "$(status scum db-guard)"
+check "naming the wait" "1" "$(scum db-guard | grep -c 'Waiting for the save')"
+check "a snapshot with no snapshot.json yet is not trusted either" "1" "$(rm -f "${data}/SaveFiles/snapshot.json"; status scum db-guard)"
+dgnew; rm -f "${server}/flux-snapshot-local.json"; mksnap 20; setmeta NONE 1000
+check "upgrade from 1.0.0 (nothing recorded, meta without node): the old rule, much newer snapshot wins" "20" "$(scum db-guard >/dev/null; dbrows "${live}")"
+dgnew; rm -f "${server}/flux-snapshot-local.json"; mksnap 20; setmeta NONE -1000
+check "upgrade from 1.0.0 with an older snapshot: live kept" "10" "$(scum db-guard >/dev/null; dbrows "${live}")"
+check "and the snapshot is remembered, so a later restore is seen as foreign" "1" "$([ -s "${server}/flux-snapshot-local.json" ] && echo 1)"
+dgnew; mksnap 30; setmeta OTHER -1000
+check "a foreign snapshot is kept before the snapshot verb overwrites it (without a guard in between)" "1" "$(scum snapshot | grep -c 'was not written by this node')"
+check "and then the volume holds this node's snapshot" "10" "$(dbrows "${snap}")"
+check "and the foreign copy is in flux-replaced" "1 30" "$(nrep) $(anyrep)"
+
+# Temp dirs: leftovers of older versions are cleaned at the start, a fresh one (a backup running) is not.
+dgnew
+mkdir -p "${data}/.flux-backup-old" "${data}/.flux-restore-fresh" "${server}/.flux-restore-old" "${data}/flux/backups"
+: >"${data}/.flux-backup-old/SCUM.db"; : >"${data}/flux/backups/x-scum.tar.gz.part"; : >"${data}/SaveFiles/SCUM.db.part"
+touch -d '2020-01-01' "${data}/.flux-backup-old" "${data}/.flux-backup-old/SCUM.db" "${server}/.flux-restore-old" "${data}/flux/backups/x-scum.tar.gz.part" "${data}/SaveFiles/SCUM.db.part"
+scum db-guard >/dev/null
+check "old temp dirs on the synced volume are removed at start" "1" "$(status test -e "${data}/.flux-backup-old")"
+check "so are old ones on the install volume" "1" "$(status test -e "${server}/.flux-restore-old")"
+check "and half-written backup / snapshot files" "1 1" "$(status test -e "${data}/flux/backups/x-scum.tar.gz.part") $(status test -e "${data}/SaveFiles/SCUM.db.part")"
+check "but one touched a moment ago is left alone" "0" "$(status test -d "${data}/.flux-restore-fresh")"
+dgnew
+check "nothing saved yet: a backup is skipped, ok false, skipped true" "False True" "$(rm -rf "${live}" "${data}/SaveFiles"; scum backup x | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["ok"], d["skipped"])')"
 
 printf '\n%d passed, %d failed\n' "${pass}" "${fail}"
 [ "${fail}" = "0" ]

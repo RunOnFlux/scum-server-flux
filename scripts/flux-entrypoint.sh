@@ -158,7 +158,7 @@ backup_save() {
   local line
   while IFS= read -r line; do
     flux_log "${line#\# }"
-  done < <(scum backup "$1" ${2:+"$2"} 2>&1)
+  done < <(scum backup-plain "$1" ${2:+"$2"} 2>&1)
 }
 
 # shellcheck disable=SC2329  # run in the background below
