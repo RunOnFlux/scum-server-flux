@@ -1,1 +1,4 @@
 tests/fixtures/* -text
+# The game's own files are CRLF: keep them byte for byte (the tests compare line endings)
+scripts/data/EconomyOverride.json -text
+scripts/data/ServerSettings.default.ini -text
