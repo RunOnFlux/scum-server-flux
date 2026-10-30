@@ -17,8 +17,8 @@ third-party SCUM images were only read for reference.
   (SQLite's online backup) goes to the synced volume every 5 minutes and at a stop (see "The save").
 - **The server cannot be told to save** and ends at once on a stop (see "The stop"); the stop takes a snapshot first and ends the game in about 3 s.
 - Crash restart in place (5 in an hour, then exit 42), game-update following, optional daily restart.
-- Backups (start, every 6 h, before a restore), restore, import of a `SCUM.db` from another server, players
-  (the save's table plus who is online), a JSON status for the hub.
+- Backups (start, every 6 h, before a restore, and on demand with `force`), restore, import of a `SCUM.db` from another server, players
+  (the save's table plus who is online), the game's own logs, a JSON status for the hub.
 - **Settings the environment cannot fix are not a crash**: state `needs-fix`, nothing restarts.
 
 ## Volumes
@@ -64,9 +64,30 @@ The password is written to `ServerSettings.ini` (that is where the game reads it
 ## `flux-scum` (the hub's CLI)
 
 `status`, `settings`, `set-settings '{"values": {...}}'`, `list|set-list <admins|banned|exclusive|whitelist|silenced|settings-admins>`,
-`players`, `file|set-file <raid|economy|notifications>`, `backups`, `backup`, `restore <name>`, `import-save <db>`,
-`restart`, `join-password`. Every command answers one JSON document. Settings are validated by the type of the
-game's default (bool, int, float, time `HH:MM:SS`, text) and refused as a whole if one is wrong. Run `flux-scum` for the list.
+`list-add|list-remove <list> <steamid64>`, `players`, `file|set-file <raid|economy|notifications>`,
+`gamelog <kind> [lines]`, `backups`, `backup <label> [force]`, `restore <name>`, `restore-mark [label]`,
+`import-save <db>`, `restart`, `join-password`. Every command answers one JSON document (a refusal is
+`{"ok": false, "error": ...}` with exit 1). Settings are validated by the type of the game's default (bool, int,
+float, time `HH:MM:SS`, text) and refused as a whole if one is wrong. Run `flux-scum` for the list.
+
+- **`status` tells an old image from a new one**: `imageVersion` (the `FLUX_IMAGE_VERSION`, `dev` on a local
+  build), `verbs` (what the hub may call) and `capabilities` (`list-add`, `list-remove`, `gamelog`, `backup-json`,
+  `backup-force-keep`, `restore-marker`, `save-guard`). A hub that does not find a name there must not call it.
+  `status.saveGuard` is what the last start decided about the save (below).
+- **`settings`** entries carry `inFile` (capability `settings-infile`): `true` when the key is in the `ServerSettings.ini` the game wrote (or the image holds), `false` when it is listed only from the shipped defaults (a key a game update removed shows as `known: true, inFile: false`), `null` for every entry when there is no file yet (first boot).
+- **`list-add` / `list-remove`** read, change and write one list under a lock, so a panel with stale state cannot
+  overwrite a list: `{"ok": true, "name", "id", "changed", "count"}`; adding what is there or removing what is not is
+  `ok` with `changed: false` and does not touch the file. Other ids' permission suffixes and CRLF are kept.
+- **`gamelog <kind> [lines]`** is the tail of the game's own log (`SaveFiles/Logs/<kind>_<time>.log`, UTF-16LE):
+  `{"ok": true, "kind", "files", "lines", "count", "truncated", "kinds"}`, oldest line first, default 200 lines, at
+  most 2000 and 512 KB. Kinds: `admin chat kill economy violations login` and any other kind found on disk
+  (`violation` is accepted). An unknown kind answers `{"ok": false, "error", "kinds": [...]}` with exit 1.
+- **`backup <label> [force]`** answers ONE JSON document and nothing else. Made: `{"ok": true, "name", "size", "why",
+  "keep"}`. Not made on purpose (nothing saved yet, or the newest is under 60 minutes old and it is not forced):
+  `{"ok": false, "skipped": true, "error"}`. Failed: `{"ok": false, "error"}`. Not ok exits 1. `force` skips the age rule;
+  a label starting with `before` is also kept (never pruned), like the ones made before a restore: use `before wipe`
+  for a safety backup before a wipe. A forced backup with another label is pruned like any other. (The supervisor's own backups use the internal `backup-plain`, which prints the `# ` log lines.)
+- **`restore-mark [label]`** (or the file `flux/restore-marker.json`, `{"time": epoch, "label": text}`): see "A restore from outside".
 
 ## The save
 
@@ -78,12 +99,44 @@ database must not be synchronised file by file, so:
 - `flux-scum snapshot` (SQLite `backup()` of the open database, then `quick_check`) writes the synced copy
   on the data volume every 5 minutes and at a stop; Python's backup against the game's open database was
   tested and the game did not notice (0.04 s for an empty save);
-- **`db-guard` before every start**: no live save and a snapshot (a new node) -> the snapshot is used; a
-  snapshot much newer than the live save (another node ran meanwhile) -> the snapshot is used and the local
-  copy kept in `flux-replaced`; a live save failing `quick_check` -> the snapshot, else the newest backup;
-  a save this server had and none anywhere (a half-synced volume) -> the start waits 5 minutes, then puts
-  back the newest backup, else waits with the reason in the state. It never starts a new world over a real one;
-- backups are `.tar.gz` of a consistent copy of the database plus the config folder.
+- **`db-guard` before every start** decides with an explicit signal, not with file times alone. `snapshot.json`
+  carries `time`, `size`, `node` (a random id kept on the install volume, never synced) and `write` (an id per
+  snapshot); each node keeps `flux-snapshot-local.json` (install volume) with the last meta it wrote or adopted.
+  The snapshot is trusted only when `snapshot.json.size == size of SCUM.db` (they sync as separate files).
+
+  | Situation | Decision |
+  |---|---|
+  | no live save, trusted snapshot (new node) | snapshot used |
+  | no live save, snapshot not trusted / nothing arrived | wait 5 min, then newest backup, else wait (never a new world over a real one) |
+  | live save fails `quick_check` | snapshot, else newest backup |
+  | restore marker present, snapshot trusted | **restore honoured**: snapshot used, this node's copy to `flux-replaced`, marker consumed |
+  | restore marker present, files not all there | wait up to 5 min, then give up (`lastRestore` not ok), marker removed |
+  | live + snapshot not trusted | live kept |
+  | snapshot is this node's (or already adopted) | live kept (`own`) |
+  | foreign, newer than this node's last, live untouched since | **failover**: snapshot used, live to `flux-replaced` |
+  | foreign, newer, and live also changed since | **split-brain**: the later of the two is used, the other is kept in `flux-replaced`, notice |
+  | foreign, not newer than this node's last, no marker (a restore, or a stale sync) | live kept, the snapshot kept in `flux-replaced`, notice (`older-snapshot`) |
+  | nothing recorded on this node (upgrade from 1.0.0) | the old rule: a snapshot much newer than the live save wins |
+
+  `flux-replaced` (install volume) keeps the newest 8 copies. The decision is in `flux/save-guard.json` and in
+  `flux-scum status` as `saveGuard` `{decision, message, notice, time}`. Stops and the 5-minute snapshot also check:
+  a snapshot on the volume that this node did not write is copied to `flux-replaced` before it is overwritten, and
+  nothing is overwritten while a restore marker waits. **Unit-tested only**: no two real nodes or hub restore ran;
+- backups are `.tar.gz` of a consistent copy of the database plus the config folder; the temporary copy is made
+  on the install volume (`.flux-backup-*` / `.flux-restore-*` under `/mnt/scum/server`), never on the synced one, and
+  leftovers (also those 1.0.0 left on the data volume) older than 10 minutes are removed at every start.
+
+### A restore from outside (the hub's automatic backups)
+
+A restore that puts an OLDER `SCUM.db` and `snapshot.json` straight on the synced volume looks, to the image, like
+a stale sync, so by default it is **not** honoured (both copies are kept and the panel is told). To make the image
+honour it, in this order: (1) `flux-scum restore-mark "<label>"` while the container still runs (it records the snapshot
+on the volume now, and from then on no snapshot overwrites the volume), (2) stop the app, (3) write `SCUM.db` and THEN
+`snapshot.json` on the volume, (4) start it. The next start uses the first snapshot that differs from the recorded one;
+a marker whose files never arrive is dropped after 5 minutes (`lastRestore.ok` false) and the save on the node is kept.
+While a marker waits, snapshots are skipped (`status.restoreMarkerPending`), so restart promptly. A marker file written
+by hand (`flux/restore-marker.json`, `{"time": epoch, "label": text}`) works too; it has no record, so this node's own
+snapshot counts as "not arrived yet".
 
 ## The stop
 
@@ -101,6 +154,7 @@ client** (none was available), so the image does not default to it: `SCUM_BATTLE
 
 ## Versions
 
+- 1.0.1: `db-guard` honours a restore (marker) and tells a failover, a split-brain and a stale/older snapshot apart; backup/restore temp dirs on the install volume; `backup` answers one JSON document and `force` skips the 60-minute rule (a `before...` label keeps the backup); new verbs `list-add`, `list-remove`, `gamelog`, `restore-mark`; `status` carries `imageVersion`, `verbs`, `capabilities`, `saveGuard`.
 - 1.0.0 (2026-10-29): first release. The game's own database copies and logs are pruned at every start (it deletes none); its logs are read as UTF-16LE.
 
 ## Measured

@@ -167,7 +167,10 @@ check "an up-to-date install is not retried" "0" "$(grep -c 'steamcmd failed' /t
 
 # A restore through the panel's command.
 wait_for 'grep -q "\"running\"" ${data}/flux/state.json' 20
-flux-scum backup "test" force >/dev/null
+check "the panel's backup answers one JSON document, forced but not kept" "True False" "$(flux-scum backup "test" force | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["ok"], d["keep"])')"
+check "the supervisor's own start backup is logged" "1" "$(grep -c -E 'backup [0-9]{8}-[0-9]{6}-scum.tar.gz \(start' /tmp/entry.log | awk '{print ($1 > 0) ? 1 : 0}')"
+check "status tells the hub what this image can do" "True" "$(flux-scum status | python3 -c 'import json,sys;d=json.load(sys.stdin);print("gamelog" in d["capabilities"] and bool(d["imageVersion"]))')"
+check "gamelog and list-add work inside the image" "True True" "$(flux-scum gamelog admin | python3 -c 'import json,sys;print(json.load(sys.stdin)["ok"])') $(flux-scum list-add admins 76561198000000042 | python3 -c 'import json,sys;print(json.load(sys.stdin)["changed"])')"
 backup="$(flux-scum backups | python3 -c 'import json,sys;print(json.load(sys.stdin)["backups"][0]["name"])')"
 check "restore restarts the running server" "True" "$(flux-scum restore "${backup}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["restarting"])')"
 check "and the third start restored it" "0" "$(status wait_for '[ "$(flux-scum status | python3 -c "import json,sys;print(json.load(sys.stdin)[\"generation\"])")" = 3 ]' 40)"

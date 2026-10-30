@@ -17,7 +17,7 @@ images are reference only and are never shipped.
 
 ```bash
 ./tests/test-flux.sh                                   # unit tests (flux-lib.sh, fluxscum.py)
-docker build --build-arg FLUX_IMAGE_VERSION=1.0.0 -t scum-server-flux:local .
+docker build --build-arg FLUX_IMAGE_VERSION=1.0.1 -t scum-server-flux:local .
 ./tests/test-image.sh scum-server-flux:local           # the scripts INSIDE the image, stand-in steamcmd + server
 docker run --rm -v "$PWD:/m" -w /m koalaman/shellcheck:stable -x scripts/*.sh tests/*.sh tests/image/*.sh .github/ci/*.sh
 ```
@@ -43,6 +43,12 @@ A real-game test needs the install volume (15.5 GB): see README "Measured" for t
   volume is a snapshot made with SQLite's online backup (`flux-scum snapshot`, every 5 minutes and at a
   stop). A live WAL database must never go through a file synchroniser. Python's `sqlite3` backup against
   the game's open database was tested and the game did not notice.
+- **`db-guard` decides by node id and meta, not by file times** (see README "The save" for the table):
+  `snapshot.json` carries `node`/`write`, each node keeps `flux-snapshot-local.json` on `ml:`. The stop
+  snapshot runs BEFORE the next guard, so `cmd_snapshot` itself must not overwrite a foreign snapshot or a pending
+  restore marker (it keeps the foreign one in `flux-replaced` first). Temp dirs go under `SERVER_DIR`
+  (`ml:`), never `DATA_DIR`; a rename never crosses the two volumes. Read-modify-write commands use `locked()`.
+  Tests that simulate a second node use a second `FLUX_SERVER_DIR` on the same `FLUX_DATA_DIR`.
 - **The server cannot be told to save** and ends at once on SIGINT (exit code 0, no shutdown code run:
   the log just stops). The WAL makes that safe for the database; the stop takes a snapshot first.
 - **No Steam A2S query**: nothing answers on the game port or any other UDP port (checked with the
