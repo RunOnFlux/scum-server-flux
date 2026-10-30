@@ -716,17 +716,22 @@ def cmd_apply(_args):
 # ------------------------------------------------------------------------------------------------
 
 def cmd_settings(_args):
+    # inFile: is the key in the settings file the game itself wrote (or the image holds)? null when there is
+    # no such file yet (first boot: load_ini() below makes it from the shipped defaults, so every key would
+    # be "in the file" and say nothing).
+    had_file = bool((read_text(ini_path()) or "").strip())
     rows, _, _ = load_ini()
     defaults = defaults_table()
     seen, items = set(), []
     for section, key, value, _i in rows:
         dsec, ddef, dkind = defaults.get(key, (section, value, infer_type(value)))
         items.append({"key": key, "section": section or dsec, "type": dkind, "default": ddef,
-                      "value": "" if key in SECRET_KEYS else value, "known": key in defaults})
+                      "value": "" if key in SECRET_KEYS else value, "known": key in defaults,
+                      "inFile": True if had_file else None})
         seen.add(key)
     for key, (section, ddef, kind) in defaults.items():
         if key not in seen:
-            items.append({"key": key, "section": section, "type": kind, "default": ddef, "value": ddef, "known": True})
+            items.append({"key": key, "section": section, "type": kind, "default": ddef, "value": ddef, "known": True, "inFile": False if had_file else None})
     out({"settings": items, "maxPlayersCap": MAX_PLAYERS_CAP, "secrets": sorted(SECRET_KEYS),
          "passworded": bool(ini_value("scum.ServerPassword", ""))})
 
@@ -1614,7 +1619,7 @@ def installed_build():
 # `status` is talking to an older image and must not call it (an old image answers "usage" with exit 64).
 HUB_VERBS = ["status", "settings", "set-settings", "list", "set-list", "list-add", "list-remove", "players", "file",
              "set-file", "gamelog", "backups", "backup", "restore", "restore-mark", "import-save", "restart", "join-password"]
-CAPABILITIES = ["list-add", "list-remove", "gamelog", "backup-json", "backup-force-keep", "restore-marker", "save-guard"]
+CAPABILITIES = ["list-add", "list-remove", "gamelog", "backup-json", "backup-force-keep", "restore-marker", "save-guard", "settings-infile"]
 
 
 def cmd_status(_args):

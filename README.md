@@ -74,6 +74,7 @@ float, time `HH:MM:SS`, text) and refused as a whole if one is wrong. Run `flux-
   build), `verbs` (what the hub may call) and `capabilities` (`list-add`, `list-remove`, `gamelog`, `backup-json`,
   `backup-force-keep`, `restore-marker`, `save-guard`). A hub that does not find a name there must not call it.
   `status.saveGuard` is what the last start decided about the save (below).
+- **`settings`** entries carry `inFile` (capability `settings-infile`): `true` when the key is in the `ServerSettings.ini` the game wrote (or the image holds), `false` when it is listed only from the shipped defaults (a key a game update removed shows as `known: true, inFile: false`), `null` for every entry when there is no file yet (first boot).
 - **`list-add` / `list-remove`** read, change and write one list under a lock, so a panel with stale state cannot
   overwrite a list: `{"ok": true, "name", "id", "changed", "count"}`; adding what is there or removing what is not is
   `ok` with `changed: false` and does not touch the file. Other ids' permission suffixes and CRLF are kept.

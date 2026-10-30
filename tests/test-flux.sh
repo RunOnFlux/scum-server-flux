@@ -125,6 +125,12 @@ check "players above the cap are refused by the env" "64" "$(scum SCUM_MAX_PLAYE
 
 # Settings, validated by the type the game's default has.
 check "settings lists every key" "437" "$(scum settings | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["settings"]))')"
+check "settings: a key in the live file is inFile true" "True" "$(scum settings | python3 -c 'import json,sys
+print([x for x in json.load(sys.stdin)["settings"] if x["key"]=="scum.ServerName"][0]["inFile"])')"
+check "settings: a key only in the shipped defaults is inFile false" "False 1" "$(sed -i '/^scum.MaxAllowedBirds=/d' "${ini}"; scum settings | python3 -c 'import json,sys
+e=[x for x in json.load(sys.stdin)["settings"] if x["key"]=="scum.MaxAllowedBirds"][0]; print(e["inFile"], int(e["known"]))')"
+check "settings: no live file yet, inFile is null for all" "None 437" "$(rm -rf "${tmp}/nofile"; FLUX_DATA_DIR="${tmp}/nofile" scum FLUX_DATA_DIR="${tmp}/nofile" settings | python3 -c 'import json,sys
+s=json.load(sys.stdin)["settings"]; print(s[0]["inFile"] if all(x["inFile"] is None for x in s) else "mixed", len(s))')"
 check "a key has its default and type" "bool False" "$(scum settings | python3 -c 'import json,sys
 for s in json.load(sys.stdin)["settings"]:
     if s["key"]=="scum.AllowEvents": print(s["type"], not s["default"]=="True")')"
@@ -373,7 +379,7 @@ PY
 )"
 
 # Status and restart.
-check "status names the image version and what it can do" "True" "$(scum FLUX_IMAGE_VERSION=1.0.1 status | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["imageVersion"]=="1.0.1" and all(c in d["capabilities"] for c in ("list-add","list-remove","gamelog","backup-json","restore-marker")) and "gamelog" in d["verbs"])')"
+check "status names the image version and what it can do" "True" "$(scum FLUX_IMAGE_VERSION=1.0.1 status | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["imageVersion"]=="1.0.1" and all(c in d["capabilities"] for c in ("list-add","list-remove","gamelog","backup-json","restore-marker","settings-infile")) and "gamelog" in d["verbs"])')"
 check "status carries the build" "24343458" "$(scum status | jget build)"
 check "and the state" "running" "$(scum status | jget state)"
 check "a restart is a marker" "0" "$(status scum restart)"
