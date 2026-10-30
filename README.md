@@ -129,8 +129,13 @@ database must not be synchronised file by file, so:
 
 A restore that puts an OLDER `SCUM.db` and `snapshot.json` straight on the synced volume looks, to the image, like
 a stale sync, so by default it is **not** honoured (both copies are kept and the panel is told). To make the image
-honour it, after the hub wrote BOTH files (SCUM.db first, `snapshot.json` last), call `flux-scum restore-mark "<label>"`
-(or write `flux/restore-marker.json`), then restart the app. A marker whose files never become usable is dropped after 5 minutes.
+honour it, in this order: (1) `flux-scum restore-mark "<label>"` while the container still runs (it records the snapshot
+on the volume now, and from then on no snapshot overwrites the volume), (2) stop the app, (3) write `SCUM.db` and THEN
+`snapshot.json` on the volume, (4) start it. The next start uses the first snapshot that differs from the recorded one;
+a marker whose files never arrive is dropped after 5 minutes (`lastRestore.ok` false) and the save on the node is kept.
+While a marker waits, snapshots are skipped (`status.restoreMarkerPending`), so restart promptly. A marker file written
+by hand (`flux/restore-marker.json`, `{"time": epoch, "label": text}`) works too; it has no record, so this node's own
+snapshot counts as "not arrived yet".
 
 ## The stop
 

@@ -208,6 +208,10 @@ def locked():
     os.makedirs(os.path.dirname(LOCK_FILE), exist_ok=True)
     fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o666)
     try:
+        try:
+            os.fchmod(fd, 0o666)
+        except OSError:
+            pass
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
@@ -851,8 +855,10 @@ def new_meta():
 def publish_snapshot_meta():
     """Called once SNAP_DB is final: the record on this node, then the meta on the synced volume."""
     meta = new_meta()
-    write_local_record(meta)
+    # The meta first, then the record: a kill in between leaves a meta of this node that is NEWER than the
+    # record, which meta_is_ours() accepts. The other order would leave one that looks like an older restore.
     write_json(SNAP_META, meta)
+    write_local_record(meta)
     write_json(DB_SEEN, {"time": meta["time"]})
     return meta
 
@@ -1004,6 +1010,15 @@ def guard_restore_marker():
     label = str(mk.get("label") or "restore from the hub")[:80]
     asked = int(mk.get("time") or os.path.getmtime(RESTORE_MARKER))
     meta, why = read_snapshot()
+    if meta:
+        # The marker may be dropped BEFORE the restored files arrive (the hub calls restore-mark while the
+        # container still runs). Only a snapshot that is not the one seen at that moment is the restore.
+        if "before" in mk:
+            before = mk["before"]
+            if before is not None and (meta.get("node"), meta.get("time"), meta.get("write")) == tuple(before):
+                meta, why = None, "the restored files have not arrived yet (the snapshot is still the one from before the restore)"
+        elif local_record() and meta_is_ours(meta, local_record()):
+            meta, why = None, "the restored files have not arrived yet (the snapshot is still this node's own)"
     if meta and db_ok(SNAP_DB):
         adopt_snapshot(meta, f"restore marker honoured ({label}): the restored save is used")
         os.remove(RESTORE_MARKER)
@@ -1137,11 +1152,15 @@ def clear_db_missing():
 
 
 def cmd_restore_mark(args):
-    """The hub puts an older SCUM.db and snapshot.json on the synced volume and then calls this (or writes
-    flux/restore-marker.json itself, {"time": epoch, "label": text}). The next db-guard uses them instead of
-    the save on this node, and snapshots stop overwriting them until then."""
+    """The hub calls this FIRST (it records the snapshot on the volume now), then stops the app, writes the
+    older SCUM.db and then snapshot.json on the synced volume, and restarts. The next db-guard uses the
+    first snapshot that differs from the recorded one instead of the save on this node, and snapshots stop
+    overwriting the volume until then. A marker file written by hand (flux/restore-marker.json, {"time":
+    epoch, "label": text}) has no record: then this node's own snapshot counts as "not arrived yet"."""
     label = (args[0] if args else "restore from the hub")[:80]
-    write_json(RESTORE_MARKER, {"time": int(time.time()), "label": label})
+    seen, _why = read_snapshot()
+    before = [seen.get("node"), seen.get("time"), seen.get("write")] if seen else None
+    write_json(RESTORE_MARKER, {"time": int(time.time()), "label": label, "before": before})
     out({"ok": True, "label": label, "appliesOn": "restart"})
 
 

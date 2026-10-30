@@ -454,18 +454,27 @@ check "the older snapshot is kept in flux-replaced" "1 30" "$(nrep) $(anyrep)"
 check "the stop snapshot that follows does not lose it nor duplicate it" "1 30 10" "$(scum snapshot >/dev/null; echo "$(nrep) $(anyrep) $(dbrows "${snap}")")"
 dgnew; mksnap 30; setmeta OWN -1000
 check "an older snapshot with this node's own id (a restored backup of this node) is not own either" "10 older-snapshot" "$(scum db-guard >/dev/null; echo "$(dbrows "${live}") $(decision)")"
-dgnew; mksnap 30; setmeta OTHER -1000; scum restore-mark "hub restore" >/dev/null
+dgnew; scum restore-mark "hub restore" >/dev/null; mksnap 30; setmeta OTHER -1000
 check "restore marker: the stop snapshot does not overwrite the restored files" "30" "$(scum snapshot >/dev/null; dbrows "${snap}")"
 check "and the next start uses them" "30 restore-marker" "$(scum db-guard >/dev/null; echo "$(dbrows "${live}") $(decision)")"
 check "the marker is consumed" "1" "$(status test -e "${data}/flux/restore-marker.json")"
 check "this node's copy is kept" "1 10" "$(nrep) $(anyrep)"
 check "the restore is reported" "True" "$(jget ok <"${data}/flux/last-restore.json")"
 check "and the next start has nothing to decide" "own" "$(scum db-guard >/dev/null; decision)"
-dgnew; mksnap 30; setmeta OTHER -1000; rm -f "${data}/SaveFiles/snapshot.json"; scum restore-mark >/dev/null
+dgnew; scum restore-mark >/dev/null
+check "a marker dropped BEFORE the files arrive does not roll back to this node's own snapshot: it waits" "1" "$(status scum db-guard)"
+check "and live is untouched" "10 0" "$(dbrows "${live}") $(nrep)"
+mksnap 30; setmeta OTHER -1000; rm -f "${data}/SaveFiles/snapshot.json"
 check "a marker whose files have not all arrived waits" "1" "$(status scum db-guard)"
 check "and says so" "1" "$(scum db-guard | grep -c 'Waiting for the restored save')"
 check "after the grace it gives up, keeps live, reports a failed restore" "0 10 False" "$(scum FLUX_DB_SYNC_GRACE_SECONDS=0 db-guard >/dev/null; echo "$? $(dbrows "${live}") $(jget ok <"${data}/flux/last-restore.json")")"
 check "and removes the marker" "1" "$(status test -e "${data}/flux/restore-marker.json")"
+dgnew; printf '{"time": %s, "label": "by hand"}' "$(date +%s)" >"${data}/flux/restore-marker.json"
+check "a marker written by hand, with this node's own snapshot still there, waits" "1" "$(status scum db-guard)"
+mksnap 30; setmeta OTHER -1000
+check "and honours the files once they differ" "30 restore-marker" "$(scum db-guard >/dev/null; echo "$(dbrows "${live}") $(decision)")"
+dgnew; scum restore-mark >/dev/null
+check "a marker whose restore never arrives is dropped after the grace, live kept, reported" "10 False" "$(scum FLUX_DB_SYNC_GRACE_SECONDS=0 db-guard >/dev/null; echo "$(dbrows "${live}") $(jget ok <"${data}/flux/last-restore.json")")"
 dgnew; mksnap 40; setmeta OTHER 500; touch -d "@$((R + 1000))" "${live}"
 check "split-brain, live changed later than the snapshot: live is used" "10 split-brain" "$(scum db-guard >/dev/null; echo "$(dbrows "${live}") $(decision)")"
 check "and the other copy is kept" "1 40" "$(nrep) $(anyrep)"
