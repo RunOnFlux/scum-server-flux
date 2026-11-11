@@ -50,12 +50,20 @@ cat >/usr/local/bin/steamcmd <<'STUB'
 dir=""
 for a in "$@"; do [ "${prev:-}" = "+force_install_dir" ] && dir="$a"; prev="$a"; done
 echo "$*" >>/tmp/steamcmd-calls
+# The public branch, as app_info_print prints it (/tmp/.public-build holds the buildid; none = no answer).
+case " $* " in *" +app_info_print "*)
+  [ -f /tmp/.public-build ] && printf '"branches"\n{\n\t"public"\n\t{\n\t\t"buildid"\t\t"%s"\n\t}\n}\n' "$(cat /tmp/.public-build)"
+  exit 0 ;;
+esac
 [ -n "${dir}" ] || exit 0
 if [ ! -f /tmp/.first-failed ]; then touch /tmp/.first-failed; echo "ERROR! Failed to install app '3792580' (Missing configuration)"; exit 8; fi
 mkdir -p "${dir}/steamapps" "${dir}/SCUM/Binaries/Win64"
 : >"${dir}/SCUM/Binaries/Win64/SCUMServer.exe"
-printf '"AppState"\n{\n\t"buildid"\t\t"100"\n}\n' >"${dir}/steamapps/appmanifest_3792580.acf"
-if [ -f /tmp/.installed ]; then echo "Success! App '3792580' already up to date."; else touch /tmp/.installed; echo "Success! App '3792580' fully installed."; fi
+acf="${dir}/steamapps/appmanifest_3792580.acf"
+# Like the real one on 2026-11-11: with a record present it says "up to date" whatever Steam's public build is.
+if [ -f "${acf}" ]; then echo "Success! App '3792580' already up to date."; exit 0; fi
+printf '"AppState"\n{\n\t"buildid"\t\t"%s"\n}\n' "$(cat /tmp/.public-build 2>/dev/null || echo 100)" >"${acf}"
+touch /tmp/.installed; echo "Success! App '3792580' fully installed."
 STUB
 cat >/opt/standin/SCUMServer.exe <<'GAME'
 #!/usr/bin/env python3
@@ -136,7 +144,7 @@ export FLUX_RESTART_BACKOFF=1 FLUX_UPDATE_CHECK_MINUTES=0 SCUM_SERVER_NAME="Imag
 entry=$!
 check "the server comes up (its world is loaded)" "0" "$(status wait_for 'grep -q "\"running\"" ${data}/flux/state.json 2>/dev/null' 40)"
 check "a fresh SteamCMD's first failure is retried without validate" "0" "$(grep -c validate /tmp/steamcmd-calls)"
-check "and it took two calls" "2" "$(wc -l </tmp/steamcmd-calls)"
+check "and it took two installs" "2" "$(grep -c app_update /tmp/steamcmd-calls)"
 check "the Wine prefix is made on the install volume" "0" "$(status test -d "${srv}/flux-wine/drive_c")"
 check "no virtual display is started" "1" "$(status pgrep -x Xvfb)"
 check "and the server gets none" "1" "$(grep -c 'env DISPLAY=unset' /tmp/entry.log)"
@@ -181,6 +189,20 @@ wait_for 'grep -q "\"running\"" ${data}/flux/state.json' 20
 pkill -KILL -f '[S]CUMServer\.exe'
 check "a crashed server is started again" "0" "$(status wait_for '[ "$(flux-scum status | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[\"state\"],d[\"generation\"])")" = "running 4" ]' 40)"
 check "and its save survived the kill (WAL recovered)" "ok" "$(python3 -c 'import sqlite3;print(sqlite3.connect("'"${srv}"'/SCUM/Saved/SaveFiles/SCUM.db").execute("pragma quick_check").fetchone()[0])')"
+
+# A SteamCMD that says "up to date" while the public build is newer (the stale-build bug of 2026-11-11):
+# the supervisor sets the record aside and installs again, and the server ends up on the public build.
+echo 200 >/tmp/.public-build
+flux-scum restart >/dev/null
+check "a stale 'up to date' is caught and the build brought to the public one" "0" "$(status wait_for 'grep -q "server build 200" /tmp/entry.log' 40)"
+check "the new build is in the record" "200" "$(awk -F'"' '$2 == "buildid" { print $4 }' "${srv}/steamapps/appmanifest_3792580.acf")"
+check "the set-aside record is gone" "1" "$(status test -e "${srv}/appmanifest_3792580.acf.flux-bak")"
+check "and the server is up again" "0" "$(status wait_for 'grep -q "\"running\"" ${data}/flux/state.json 2>/dev/null' 40)"
+flux-scum restart >/dev/null
+wait_for 'grep -c "flux-entrypoint starting" /tmp/entry.log | grep -q "^[3-9]"' 20
+sleep 3
+check "with the public build installed nothing is installed again" "0" "$(grep -c 'updating again as a fresh install' /tmp/entry.log | awk '{print ($1 > 1) ? 1 : 0}')"
+rm -f /tmp/.public-build
 
 # A stop from Docker.
 wait_for 'grep -q "\"running\"" ${data}/flux/state.json' 20
