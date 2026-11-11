@@ -112,6 +112,41 @@ ensure_prefix() {
   [ -d "${WINEPREFIX}/drive_c" ]
 }
 
+# The public branch's buildid, as SteamCMD's own app info says it. Empty when Steam cannot be asked.
+steam_public_build() {
+  steamcmd +login anonymous +app_info_update 1 +app_info_print "${FLUX_STEAM_APP}" +quit 2>/dev/null | flux_public_build
+}
+
+# SteamCMD's app_update can answer "already up to date" while the public branch is on a newer build
+# (measured 2026-11-11: build 26320224 kept for hours after 26593814 was published, while
+# app_info_print named the new one; no flag made it reliable). So the answer is never taken on trust:
+# when the installed buildid differs from the public one, the appmanifest is set aside and the update
+# runs again as a fresh install over the files (the changed files only are downloaded). Never fatal:
+# if Steam cannot be asked, or the second run fails, the server starts on what is installed.
+catch_up_build() {
+  local acf="${s}/steamapps/appmanifest_${FLUX_STEAM_APP}.acf" bak="${s}/appmanifest_${FLUX_STEAM_APP}.acf.flux-bak"
+  local installed public
+  installed="$(flux_installed_build "${acf}")"
+  public="$(steam_public_build)"
+  if [ -z "${installed}" ] || [ -z "${public}" ] || [ "${installed}" = "${public}" ]; then
+    return 0
+  fi
+  flux_log "WARN SteamCMD says up to date, but build ${public} is on Steam and ${installed} is installed: updating again as a fresh install"
+  scum state updating "Downloading the new server build from Steam"
+  mv -f "${acf}" "${bak}"
+  steamcmd +@sSteamCmdForcePlatformType windows +force_install_dir "${s}" +login anonymous \
+    +app_info_update 1 +app_update "${FLUX_STEAM_APP}" +quit >/tmp/steamcmd-catchup.log 2>&1 &
+  wait $!
+  if grep -qE "fully installed|already up to date" /tmp/steamcmd-catchup.log && [ "$(flux_installed_build "${acf}")" = "${public}" ]; then
+    rm -f "${bak}"
+    return 0
+  fi
+  flux_log "WARN the fresh install did not reach build ${public}: $(grep -aE 'ERROR|Error|error' /tmp/steamcmd-catchup.log | tail -2 | tr '\n' ' ')starting the build already installed"
+  # Nothing written means the old record is still the truth; a partial one is left for the next start to finish.
+  if [ ! -f "${acf}" ]; then mv -f "${bak}" "${acf}"; else rm -f "${bak}"; fi
+  return 0
+}
+
 update_server() {
   local attempt validate
   if flux_truthy "${SKIP_UPDATE:-}" && [ -f "${s}/${FLUX_GAME_EXE}" ]; then
@@ -134,6 +169,7 @@ update_server() {
     wait $!
     # "fully installed" after a download, "already up to date" otherwise.
     if [ -f "${s}/${FLUX_GAME_EXE}" ] && grep -qE "fully installed|already up to date" /tmp/steamcmd.log; then
+      catch_up_build
       flux_log "server build $(flux_installed_build "${s}/steamapps/appmanifest_${FLUX_STEAM_APP}.acf")"
       return 0
     fi
@@ -244,7 +280,7 @@ watcher() {
     if [ "${FLUX_UPDATE_CHECK_MINUTES}" -gt 0 ] 2>/dev/null && [ $((now - last_check)) -ge $((FLUX_UPDATE_CHECK_MINUTES * 60)) ]; then
       last_check="${now}"
       build="$(flux_installed_build "${s}/steamapps/appmanifest_${FLUX_STEAM_APP}.acf")"
-      public="$(steamcmd +login anonymous +app_info_update 1 +app_info_print "${FLUX_STEAM_APP}" +quit 2>/dev/null | flux_public_build)"
+      public="$(steam_public_build)"
       if [ -n "${public}" ] && [ -n "${build}" ] && [ "${public}" != "${build}" ] && ! scum update-skip "${public}"; then
         flux_log "a new server build is on Steam (${build} -> ${public}): restarting onto it when the server is empty, at most ${FLUX_UPDATE_WAIT_MINUTES} min from now"
         scum note updateWaiting "${public}"

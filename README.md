@@ -154,6 +154,7 @@ client** (none was available), so the image does not default to it: `SCUM_BATTLE
 
 ## Versions
 
+- 1.0.2 (2026-11-11): the update never takes SteamCMD's "already up to date" on trust: when the installed buildid differs from the public one (as `app_info_print` names it), the appmanifest is set aside and the update runs again as a fresh install (found when a Steam update was not applied for hours and players got "your game version must match this server version").
 - 1.0.1: `db-guard` honours a restore (marker) and tells a failover, a split-brain and a stale/older snapshot apart; backup/restore temp dirs on the install volume; `backup` answers one JSON document and `force` skips the 60-minute rule (a `before...` label keeps the backup); new verbs `list-add`, `list-remove`, `gamelog`, `restore-mark`; `status` carries `imageVersion`, `verbs`, `capabilities`, `saveGuard`.
 - 1.0.0 (2026-10-29): first release. The game's own database copies and logs are pruned at every start (it deletes none); its logs are read as UTF-16LE.
 
