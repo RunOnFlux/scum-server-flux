@@ -91,6 +91,10 @@ RESTORE_MARKER = os.path.join(STATE_DIR, "restore-marker.json")
 SAVE_GUARD_FILE = os.path.join(STATE_DIR, "save-guard.json")
 # LOCAL (install volume, never synced): who this node is, and the last snapshot meta it wrote or adopted.
 NODE_ID_FILE = os.path.join(SERVER_DIR, "flux-node-id")
+# LOCAL too: the settings as they were handed to the game at the last start, and whether the first run
+# of the game on THIS install has been checked (see cmd_ini_pin / cmd_ini_recover).
+INI_PIN_FILE = os.path.join(SERVER_DIR, "flux-ini-pin.json")
+INI_RECOVERED_FILE = os.path.join(SERVER_DIR, "flux-ini-recovered")
 LOCAL_SNAP_FILE = os.path.join(SERVER_DIR, "flux-snapshot-local.json")
 LOCK_FILE = os.path.join(SERVER_DIR, "flux-scum.lock")
 REPLACED_DIR = os.path.join(SERVER_DIR, "flux-replaced")
@@ -372,6 +376,12 @@ def set_ini_values(changes):
             lines = lines2
     if applied:
         write_text(ini_path(), "".join(lines))
+        # A deliberate write (the panel, the env) is not something the game's first run threw away: the
+        # pin follows it (see cmd_ini_recover).
+        pin = read_json(INI_PIN_FILE)
+        if isinstance(pin, dict):
+            pin.update(applied)
+            write_json(INI_PIN_FILE, pin)
     return applied, errors
 
 
@@ -1713,6 +1723,54 @@ def cmd_update_skip(args):
     sys.exit(1)
 
 
+def cmd_ini_pin(_args):
+    """Remembers every setting as it is handed to the game (local, install volume). Run just before the
+    game starts, after `apply`."""
+    # Until the first run has been checked, the OLDEST pin stands: a first run that dies before its world
+    # is loaded is started again, and by then the file already holds the game's reset values.
+    if not os.path.exists(INI_RECOVERED_FILE) and isinstance(read_json(INI_PIN_FILE), dict):
+        return
+    rows, _, _ = load_ini()
+    write_json(INI_PIN_FILE, {k: v for _s, k, v, _i in rows})
+
+
+def cmd_ini_recover(_args):
+    """The game's FIRST run on an install (measured 2026-11-15, real game, fresh Saved folder: our file
+    was rewritten with the game's own defaults within 8 s, the name and the password lost) throws away
+    the settings it was given. Every later start keeps them. After that first run, put back the
+    settings that went back to the game's default while they were not at the start. Once per install:
+    the marker is local, so a failover onto a node that has never run the game gets its own check.
+    Prints `# RECOVERED: <keys>` when it changed anything (the caller restarts the game, which only
+    reads the file at start), nothing otherwise. A setting is only put back when it equals the
+    game's default NOW and did not BEFORE: a panel edit made in that window to a non-default value stays."""
+    if os.path.exists(INI_RECOVERED_FILE):
+        return
+    pin = read_json(INI_PIN_FILE)
+    write_text(INI_RECOVERED_FILE, "1\n")
+    if not isinstance(pin, dict):
+        return
+    rows, _, _ = load_ini()
+    now = {k: v for _s, k, v, _i in rows}
+    defaults = defaults_table()
+    back = {}
+    for key, was in pin.items():
+        dflt = defaults.get(key, (None, None, None))[1]
+        if dflt is not None and now.get(key) == dflt and was != dflt:
+            back[key] = was
+    if not back:
+        return
+    done, errors = set_ini_values(back)
+    if errors:
+        # One key the file refuses must not stop the rest.
+        done = {}
+        for key, was in back.items():
+            d, e = set_ini_values({key: was})
+            if not e:
+                done.update(d)
+    if done:
+        print("# RECOVERED: " + ", ".join(sorted(done)))
+
+
 COMMANDS = {
     "apply": cmd_apply, "args": cmd_args, "state": cmd_state, "note": cmd_note, "status": cmd_status,
     "settings": cmd_settings, "set-settings": cmd_set_settings, "join-password": cmd_join_password,
@@ -1722,7 +1780,7 @@ COMMANDS = {
     "list-add": cmd_list_add, "list-remove": cmd_list_remove, "gamelog": cmd_gamelog, "restore-mark": cmd_restore_mark, "restore": cmd_restore, "do-restore": cmd_do_restore,
     "import-save": cmd_import_save, "snapshot": cmd_snapshot, "db-guard": cmd_db_guard,
     "update-target": cmd_update_target, "update-check": cmd_update_check, "update-skip": cmd_update_skip,
-    "ready": cmd_ready,
+    "ready": cmd_ready, "ini-pin": cmd_ini_pin, "ini-recover": cmd_ini_recover,
 }
 
 

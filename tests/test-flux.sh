@@ -517,5 +517,62 @@ check "but one touched a moment ago is left alone" "0" "$(status test -d "${data
 dgnew
 check "nothing saved yet: a backup is skipped, ok false, skipped true" "False True" "$(rm -rf "${live}" "${data}/SaveFiles"; scum backup x | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["ok"], d["skipped"])')"
 
+# --- SteamCMD progress: the last "Update state" line as one human line ----------------------------
+printf 'x\r Update state (0x61) downloading, progress: 41.19 (6500000000 / 15800000000)\r Update state (0x61) downloading, progress: 50.00 (7900000000 / 15800000000)\n' >"${tmp}/sc.log"
+check "the last progress line is shown, bytes as GB" "downloading 50.0% (7.4 of 14.7 GB)" "$(flux_steam_progress "${tmp}/sc.log")"
+printf ' Update state (0x81) verifying update, progress: 99.50 (15700000000 / 15800000000)\n' >"${tmp}/sc.log"
+check "a phase of two words keeps both" "verifying update 99.5% (14.6 of 14.7 GB)" "$(flux_steam_progress "${tmp}/sc.log")"
+printf 'Logging in user anonymous\nERROR! Failed to install app (Missing configuration)\n' >"${tmp}/sc.log"
+check "no progress line yet: nothing" "" "$(flux_steam_progress "${tmp}/sc.log")"
+check "no log yet: nothing, and no error" "" "$(flux_steam_progress "${tmp}/none.log" 2>&1)"
+
+# --- The game's first run throws the settings away: they are put back once -------------------------
+data="${tmp}/data-recover"
+server="${tmp}/server-recover"
+mkdir -p "${server}/steamapps"
+ini="${data}/Config/WindowsServer/ServerSettings.ini"
+scum SCUM_SERVER_NAME="Kept Name" SCUM_PASSWORD=secret1 SCUM_MAX_PLAYERS=16 apply >/dev/null
+scum ini-pin
+python3 - "${ini}" <<'PY'
+import sys
+p = sys.argv[1]
+t = open(p, newline="").read().replace("scum.ServerName=Kept Name", "scum.ServerName=SCUM Server").replace("scum.ServerPassword=secret1", "scum.ServerPassword=")
+open(p, "w", newline="").write(t)
+PY
+check "the game reset the name" "SCUM Server" "$(inival scum.ServerName)"
+rec="$(scum ini-recover)"
+check "ini-recover names what it put back, without the password's value" "# RECOVERED: scum.ServerName, scum.ServerPassword" "${rec}"
+check "the name is back" "Kept Name" "$(inival scum.ServerName)"
+check "the password is back" "secret1" "$(inival scum.ServerPassword)"
+check "the players it kept stay" "16" "$(inival scum.MaxPlayers)"
+scum set-settings '{"values": {"scum.ServerName": "SCUM Server"}}' >/dev/null
+check "it runs once per install: a later start leaves a deliberate default alone" "" "$(scum ini-recover)"
+check "and the name stays what the panel set" "SCUM Server" "$(inival scum.ServerName)"
+rm -f "${server}/flux-ini-recovered" "${server}/flux-ini-pin.json"
+scum SCUM_SERVER_NAME="Kept Name" apply >/dev/null
+scum set-settings '{"values": {"scum.ServerName": "Kept Name"}}' >/dev/null
+scum ini-pin
+check "nothing reset: nothing to put back" "" "$(scum ini-recover)"
+# A first run that dies before its world loads: the game reset the file, the next start pins again.
+rm -f "${server}/flux-ini-recovered" "${server}/flux-ini-pin.json"
+scum ini-pin
+python3 - "${ini}" <<'PY'
+import sys
+p = sys.argv[1]
+open(p, "w", newline="").write(open(p, newline="").read().replace("scum.ServerName=Kept Name", "scum.ServerName=SCUM Server"))
+PY
+scum ini-pin
+check "a second pin before the first check keeps the first one" "Kept Name" "$(python3 -c 'import json;print(json.load(open("'"${server}"'/flux-ini-pin.json"))["scum.ServerName"])')"
+check "so the settings are still put back" "1" "$(scum ini-recover | grep -c 'RECOVERED:.*scum.ServerName')"
+# A deliberate change before the first check is not undone: the panel's and the env's writes move the pin.
+rm -f "${server}/flux-ini-recovered" "${server}/flux-ini-pin.json"
+scum SCUM_SERVER_NAME="Kept Name" SCUM_PASSWORD=pw SCUM_MAX_PLAYERS=10 apply >/dev/null
+scum ini-pin
+scum set-settings '{"values": {"scum.ServerPassword": ""}}' >/dev/null
+scum SCUM_MAX_PLAYERS=64 apply >/dev/null
+scum ini-pin
+check "a password the panel removed stays removed" "" "$(scum ini-recover)"
+check "and so does a player count the env changed to the default" "64" "$(inival scum.MaxPlayers)"
+
 printf '\n%d passed, %d failed\n' "${pass}" "${fail}"
 [ "${fail}" = "0" ]

@@ -112,6 +112,38 @@ ensure_prefix() {
   [ -d "${WINEPREFIX}/drive_c" ]
 }
 
+# SteamCMD's progress into our log every FLUX_PROGRESS_SECONDS (30), only when the line changed: the download
+# is 15.5 GB and says nothing otherwise. $1 = SteamCMD's log, $2 = what it is doing. Killed by the caller.
+steam_progress_reporter() {
+  local line last="" every="${FLUX_PROGRESS_SECONDS:-30}"
+  # Not a number, or zero: the default, never a loop that spins.
+  [[ "${every}" =~ ^[0-9]+$ ]] && [ "${every}" -ge 1 ] || every=30
+  while true; do
+    sleep "${every}"
+    line="$(flux_steam_progress "$1")"
+    if [ -n "${line}" ] && [ "${line}" != "${last}" ]; then
+      flux_log "steam: $2 ${line}"
+      last="${line}"
+    fi
+  done
+}
+
+# SteamCMD with the Windows build into the install folder, its output in $1, the progress in our log
+# meanwhile. $2 = what to call it in the log; the rest are extra +commands before +quit.
+run_steamcmd() {
+  local logfile="$1" what="$2" reporter
+  shift 2
+  steam_progress_reporter "${logfile}" "${what}" &
+  reporter=$!
+  # shellcheck disable=SC2068  # the extra arguments are separate words on purpose
+  steamcmd +@sSteamCmdForcePlatformType windows +force_install_dir "${s}" +login anonymous \
+    +app_info_update 1 +app_update "${FLUX_STEAM_APP}" $@ +quit >"${logfile}" 2>&1 &
+  wait $!
+  kill "${reporter}" 2>/dev/null
+  wait "${reporter}" 2>/dev/null
+  return 0
+}
+
 # The public branch's buildid, as SteamCMD's own app info says it. Empty when Steam cannot be asked.
 steam_public_build() {
   steamcmd +login anonymous +app_info_update 1 +app_info_print "${FLUX_STEAM_APP}" +quit 2>/dev/null | flux_public_build
@@ -134,9 +166,7 @@ catch_up_build() {
   flux_log "WARN SteamCMD says up to date, but build ${public} is on Steam and ${installed} is installed: updating again as a fresh install"
   scum state updating "Downloading the new server build from Steam"
   mv -f "${acf}" "${bak}"
-  steamcmd +@sSteamCmdForcePlatformType windows +force_install_dir "${s}" +login anonymous \
-    +app_info_update 1 +app_update "${FLUX_STEAM_APP}" +quit >/tmp/steamcmd-catchup.log 2>&1 &
-  wait $!
+  run_steamcmd /tmp/steamcmd-catchup.log "downloading the new build:"
   if grep -qE "fully installed|already up to date" /tmp/steamcmd-catchup.log && [ "$(flux_installed_build "${acf}")" = "${public}" ]; then
     rm -f "${bak}"
     return 0
@@ -162,11 +192,9 @@ update_server() {
     # app_info_update first: a fresh SteamCMD answers "Missing configuration" to the very first
     # app_update of this app (measured 2026-10-24) and stops; the next attempt works. That error is
     # retried at once WITHOUT validate (validate re-hashes the whole 3 GB install).
+    flux_log "steam: attempt ${attempt}/5 started${validate:+ (with validate)}"
     # shellcheck disable=SC2086  # validate is "" or "validate"
-    steamcmd +@sSteamCmdForcePlatformType windows +force_install_dir "${s}" +login anonymous \
-      +app_info_update 1 +app_update "${FLUX_STEAM_APP}" ${validate} +quit \
-      >/tmp/steamcmd.log 2>&1 &
-    wait $!
+    run_steamcmd /tmp/steamcmd.log "attempt ${attempt}/5:" ${validate}
     # "fully installed" after a download, "already up to date" otherwise.
     if [ -f "${s}/${FLUX_GAME_EXE}" ] && grep -qE "fully installed|already up to date" /tmp/steamcmd.log; then
       catch_up_build
@@ -177,7 +205,7 @@ update_server() {
     if ! grep -aq "Missing configuration" /tmp/steamcmd.log; then
       validate="validate"
     fi
-    flux_log "WARN steamcmd failed (attempt ${attempt}/5): $(grep -aE 'ERROR|Error|error' /tmp/steamcmd.log | tail -2 | tr '\n' ' ')retrying in 5s${validate:+ with validate}"
+    flux_log "WARN steamcmd failed (attempt ${attempt}/5): $(grep -aE 'ERROR|Error|error' /tmp/steamcmd.log | tail -2 | tr '\n' ' ')$([ "${attempt}" -lt 5 ] && echo "retrying in 5s${validate:+ with validate}" || echo "no more attempts")"
     sleep 5 &
     wait $!
   done
@@ -258,7 +286,7 @@ wait_for_empty() {
 # prints every few seconds once it ticks), then follows Steam for a newer build and keeps the daily
 # restart. SCUM answers no Steam A2S query (measured), so the log is the readiness signal.
 watcher() {
-  local build public last_check now next_restart="" waited=0
+  local build public last_check now recovered next_restart="" waited=0
   last_check="$(date -u +%s)"
   until flux_world_loaded "${FLUX_GAME_OWN_LOG}" "${FLUX_GENERATION_MARK}"; do
     sleep 1
@@ -267,6 +295,14 @@ watcher() {
   done
   scum state running
   flux_log "the server is up, its world loaded after ${waited}s (generation ${generation})"
+  # The game's first run on this install rewrites the settings file with its own defaults; put back
+  # what it threw away and start it once more (fluxscum.py ini-recover).
+  recovered="$(scum ini-recover 2>&1)"
+  if [[ "${recovered}" == *"# RECOVERED:"* ]]; then
+    flux_log "the game's first start reset its settings (${recovered##*# RECOVERED: }): put them back"
+    request_restart "planned: first start, the game reset its settings"
+    exit 0
+  fi
   if [ -n "${restart_at}" ]; then
     next_restart="$(flux_next_daily "$(date -u +%s)" "${restart_at}")"
     scum note nextRestart "${next_restart}"
@@ -374,6 +410,7 @@ start_generation() {
   flux_prune "${FLUX_GAME_LOG_DIR}" '*-server.log' "${FLUX_GAME_LOG_KEEP}"
   [ "${terminating}" = "1" ] && return 2
 
+  scum ini-pin >/dev/null 2>&1
   # The launch line, one argument per line (fluxscum.py args).
   mapfile -t args < <(scum args)
   scum state starting "Loading the world"

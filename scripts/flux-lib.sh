@@ -265,3 +265,13 @@ flux_marker_not_before() {
   value="$(sed -n 's/^notbefore=//p' "$1" 2>/dev/null | head -1)"
   [[ "${value}" =~ ^[0-9]+$ ]] && printf '%s' "${value}" || printf '0'
 }
+
+# The last SteamCMD progress line of a log ($1) as one human line: "downloading 41.2% (6.5 of 15.8 GB)".
+# SteamCMD writes "Update state (0x61) downloading, progress: 41.19 (6500000000 / 15800000000)" and rewrites it
+# many times a second; CRs are line breaks for it. Empty when there is none yet. Pure, for the tests.
+flux_steam_progress() {
+  [ -r "$1" ] || return 0
+  tr '\r' '\n' <"$1" 2>/dev/null | grep -a 'Update state (0x[0-9a-f]*) .*progress:' | tail -1 \
+    | sed -nE 's/.*Update state \(0x[0-9a-f]+\) ([^,]+), progress: ([0-9.]+) \(([0-9]+) \/ ([0-9]+)\).*/\1\t\2\t\3\t\4/p' \
+    | awk -F'\t' '$4 > 0 { printf "%s %.1f%% (%.1f of %.1f GB)\n", $1, $2, $3 / 1073741824, $4 / 1073741824 }'
+}
