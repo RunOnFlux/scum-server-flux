@@ -548,9 +548,18 @@ check "the players it kept stay" "16" "$(inival scum.MaxPlayers)"
 scum set-settings '{"values": {"scum.ServerName": "SCUM Server"}}' >/dev/null
 check "it runs once per install: a later start leaves a deliberate default alone" "" "$(scum ini-recover)"
 check "and the name stays what the panel set" "SCUM Server" "$(inival scum.ServerName)"
-rm -f "${server}/flux-ini-recovered"
+rm -f "${server}/flux-ini-recovered" "${server}/flux-ini-pin.json"
+scum SCUM_SERVER_NAME="Kept Name" apply >/dev/null
+scum set-settings '{"values": {"scum.ServerName": "Kept Name"}}' >/dev/null
 scum ini-pin
 check "nothing reset: nothing to put back" "" "$(scum ini-recover)"
+# A first run that dies before its world loads: the game reset the file, the next start pins again.
+rm -f "${server}/flux-ini-recovered" "${server}/flux-ini-pin.json"
+scum ini-pin
+scum set-settings '{"values": {"scum.ServerName": "SCUM Server"}}' >/dev/null
+scum ini-pin
+check "a second pin before the first check keeps the first one" "Kept Name" "$(python3 -c 'import json;print(json.load(open("'"${server}"'/flux-ini-pin.json"))["scum.ServerName"])')"
+check "so the settings are still put back" "# RECOVERED: scum.ServerName" "$(scum ini-recover)"
 
 printf '\n%d passed, %d failed\n' "${pass}" "${fail}"
 [ "${fail}" = "0" ]

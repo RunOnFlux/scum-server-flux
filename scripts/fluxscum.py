@@ -1720,6 +1720,10 @@ def cmd_update_skip(args):
 def cmd_ini_pin(_args):
     """Remembers every setting as it is handed to the game (local, install volume). Run just before the
     game starts, after `apply`."""
+    # Until the first run has been checked, the OLDEST pin stands: a first run that dies before its world
+    # is loaded is started again, and by then the file already holds the game's reset values.
+    if not os.path.exists(INI_RECOVERED_FILE) and isinstance(read_json(INI_PIN_FILE), dict):
+        return
     rows, _, _ = load_ini()
     write_json(INI_PIN_FILE, {k: v for _s, k, v, _i in rows})
 
