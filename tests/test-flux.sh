@@ -556,10 +556,23 @@ check "nothing reset: nothing to put back" "" "$(scum ini-recover)"
 # A first run that dies before its world loads: the game reset the file, the next start pins again.
 rm -f "${server}/flux-ini-recovered" "${server}/flux-ini-pin.json"
 scum ini-pin
-scum set-settings '{"values": {"scum.ServerName": "SCUM Server"}}' >/dev/null
+python3 - "${ini}" <<'PY'
+import sys
+p = sys.argv[1]
+open(p, "w", newline="").write(open(p, newline="").read().replace("scum.ServerName=Kept Name", "scum.ServerName=SCUM Server"))
+PY
 scum ini-pin
 check "a second pin before the first check keeps the first one" "Kept Name" "$(python3 -c 'import json;print(json.load(open("'"${server}"'/flux-ini-pin.json"))["scum.ServerName"])')"
-check "so the settings are still put back" "# RECOVERED: scum.ServerName" "$(scum ini-recover)"
+check "so the settings are still put back" "1" "$(scum ini-recover | grep -c 'RECOVERED:.*scum.ServerName')"
+# A deliberate change before the first check is not undone: the panel's and the env's writes move the pin.
+rm -f "${server}/flux-ini-recovered" "${server}/flux-ini-pin.json"
+scum SCUM_SERVER_NAME="Kept Name" SCUM_PASSWORD=pw SCUM_MAX_PLAYERS=10 apply >/dev/null
+scum ini-pin
+scum set-settings '{"values": {"scum.ServerPassword": ""}}' >/dev/null
+scum SCUM_MAX_PLAYERS=64 apply >/dev/null
+scum ini-pin
+check "a password the panel removed stays removed" "" "$(scum ini-recover)"
+check "and so does a player count the env changed to the default" "64" "$(inival scum.MaxPlayers)"
 
 printf '\n%d passed, %d failed\n' "${pass}" "${fail}"
 [ "${fail}" = "0" ]

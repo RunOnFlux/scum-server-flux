@@ -115,9 +115,11 @@ ensure_prefix() {
 # SteamCMD's progress into our log every FLUX_PROGRESS_SECONDS (30), only when the line changed: the download
 # is 15.5 GB and says nothing otherwise. $1 = SteamCMD's log, $2 = what it is doing. Killed by the caller.
 steam_progress_reporter() {
-  local line last=""
+  local line last="" every="${FLUX_PROGRESS_SECONDS:-30}"
+  # Not a number, or zero: the default, never a loop that spins.
+  [[ "${every}" =~ ^[0-9]+$ ]] && [ "${every}" -ge 1 ] || every=30
   while true; do
-    sleep "${FLUX_PROGRESS_SECONDS:-30}"
+    sleep "${every}"
     line="$(flux_steam_progress "$1")"
     if [ -n "${line}" ] && [ "${line}" != "${last}" ]; then
       flux_log "steam: $2 ${line}"
@@ -298,7 +300,7 @@ watcher() {
   recovered="$(scum ini-recover 2>&1)"
   if [[ "${recovered}" == *"# RECOVERED:"* ]]; then
     flux_log "the game's first start reset its settings (${recovered##*# RECOVERED: }): put them back"
-    request_restart "first start: the game reset its settings"
+    request_restart "planned: first start, the game reset its settings"
     exit 0
   fi
   if [ -n "${restart_at}" ]; then

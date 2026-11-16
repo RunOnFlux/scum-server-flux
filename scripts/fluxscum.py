@@ -376,6 +376,12 @@ def set_ini_values(changes):
             lines = lines2
     if applied:
         write_text(ini_path(), "".join(lines))
+        # A deliberate write (the panel, the env) is not something the game's first run threw away: the
+        # pin follows it (see cmd_ini_recover).
+        pin = read_json(INI_PIN_FILE)
+        if isinstance(pin, dict):
+            pin.update(applied)
+            write_json(INI_PIN_FILE, pin)
     return applied, errors
 
 
