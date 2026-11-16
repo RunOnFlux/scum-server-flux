@@ -63,6 +63,8 @@ acf="${dir}/steamapps/appmanifest_3792580.acf"
 # Like the real one on 2026-11-11: with a record present it says "up to date" whatever Steam's public build is.
 if [ -f "${acf}" ]; then echo "Success! App '3792580' already up to date."; exit 0; fi
 printf '"AppState"\n{\n\t"buildid"\t\t"%s"\n}\n' "$(cat /tmp/.public-build 2>/dev/null || echo 100)" >"${acf}"
+printf ' Update state (0x61) downloading, progress: 25.00 (3900000000 / 15600000000)\r Update state (0x61) downloading, progress: 50.00 (7800000000 / 15600000000)\r'
+sleep "${STANDIN_STEAM_SECONDS:-0}"
 touch /tmp/.installed; echo "Success! App '3792580' fully installed."
 STUB
 cat >/opt/standin/SCUMServer.exe <<'GAME'
@@ -78,6 +80,13 @@ def arg(name, default=""):
 port, maxp = int(arg("port", "7777")), int(arg("MaxPlayers", "64"))
 saved = "/mnt/scum/server/SCUM/Saved"
 ini = os.path.join(saved, "Config", "WindowsServer", "ServerSettings.ini")
+first = os.path.join(saved, ".standin-ran")
+if os.environ.get("STANDIN_FIRST_RESET") and not os.path.exists(first):
+    # The real game's first run on an install rewrites the file with its own defaults (measured 2026-11-15).
+    t = open(ini, newline="").read().replace("scum.ServerName=" + os.environ.get("SCUM_SERVER_NAME", ""), "scum.ServerName=SCUM Server")
+    t = t.replace("scum.ServerPassword=" + os.environ.get("SCUM_PASSWORD", ""), "scum.ServerPassword=")
+    open(ini, "w", newline="").write(t)
+    open(first, "w").write("1")
 name = ""
 for line in open(ini, encoding="utf-8-sig"):
     if line.startswith("scum.ServerName="):
@@ -139,12 +148,14 @@ export PATH="/usr/local/bin:${PATH}"
 data=/mnt/scum/data
 srv=/mnt/scum/server
 export FLUX_RESTART_BACKOFF=1 FLUX_UPDATE_CHECK_MINUTES=0 SCUM_SERVER_NAME="Image Test" SCUM_MAX_PLAYERS=4 \
-  SCUM_GAME_PORT=31000 SCUM_PASSWORD=hunter2 FLUX_SNAPSHOT_MINUTES=0 STANDIN_LOGIN=1
+  SCUM_GAME_PORT=31000 SCUM_PASSWORD=hunter2 FLUX_SNAPSHOT_MINUTES=0 STANDIN_LOGIN=1 FLUX_PROGRESS_SECONDS=1 STANDIN_STEAM_SECONDS=3
 /opt/flux/flux-entrypoint.sh >/tmp/entry.log 2>&1 &
 entry=$!
 check "the server comes up (its world is loaded)" "0" "$(status wait_for 'grep -q "\"running\"" ${data}/flux/state.json 2>/dev/null' 40)"
 check "a fresh SteamCMD's first failure is retried without validate" "0" "$(grep -c validate /tmp/steamcmd-calls)"
 check "and it took two installs" "2" "$(grep -c app_update /tmp/steamcmd-calls)"
+check "each attempt is logged when it starts" "2" "$(grep -c 'steam: attempt [12]/5 started' /tmp/entry.log)"
+check "the download's progress is in the log" "0" "$(status grep -q 'steam: attempt 2/5: downloading 50.0% (7.3 of 14.5 GB)' /tmp/entry.log)"
 check "the Wine prefix is made on the install volume" "0" "$(status test -d "${srv}/flux-wine/drive_c")"
 check "no virtual display is started" "1" "$(status pgrep -x Xvfb)"
 check "and the server gets none" "1" "$(grep -c 'env DISPLAY=unset' /tmp/entry.log)"
@@ -221,6 +232,19 @@ check "that names the variable" "1" "$(grep -c 'SCUM_GAME_PORT=80' ${data}/flux/
 check "and keeps the supervisor alive" "0" "$(status kill -0 ${entry2})"
 kill -TERM "${entry2}"
 check "a stop ends it" "0" "$(status wait_for '! kill -0 ${entry2} 2>/dev/null' 10)"
+
+# The game's first run on a fresh install throws the settings away: they are put back, once, and the
+# server starts again with them (generation 2).
+rm -rf "${srv}/SCUM/Saved" "${srv}/flux-ini-pin.json" "${srv}/flux-ini-recovered" "${data}/Config" "${data}/flux" /tmp/.standin-first
+STANDIN_FIRST_RESET=1 /opt/flux/flux-entrypoint.sh >/tmp/entry3.log 2>&1 &
+entry3=$!
+check "a reset first run is noticed and the server restarted" "0" "$(status wait_for 'grep -q "put them back" /tmp/entry3.log' 40)"
+check "the second generation runs with the name and the password" "0" "$(status wait_for 'grep -q "name=Image Test maxp=4 port=31000" /tmp/entry3.log && [ "$(grep -c "flux-entrypoint starting" /tmp/entry3.log)" -ge 1 ] && grep -q "generation 2" /tmp/entry3.log' 40)"
+check "the first generation did start with the reset name" "1" "$(grep -c 'name=SCUM Server maxp=4' /tmp/entry3.log)"
+check "the settings file has them" "Image Test hunter2" "$(tr -d '\r' <"${data}/Config/WindowsServer/ServerSettings.ini" | sed -n 's/^scum.ServerName=//p;s/^scum.ServerPassword=//p' | tr '\n' ' ' | sed 's/ $//')"
+check "the log names the keys but not the password" "0" "$(grep -c hunter2 /tmp/entry3.log)"
+kill -TERM "${entry3}"
+wait_for '! kill -0 ${entry3} 2>/dev/null' 20
 
 # --- flux.log is local; the banner ----------------------------------------------------------------
 check "flux.log is on the install volume" "0" "$(status test -s "${srv}/flux-logs/flux.log")"

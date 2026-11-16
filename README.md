@@ -54,6 +54,7 @@ last start, so the hub's panel edits survive restarts.
 | `SCUM_EXTRA_ARGS` | more launch arguments (`-port=` and `-MaxPlayers=` are dropped) | none |
 | `SCUM_RESTART_TIME` | daily restart `HH:MM` (TZ, UTC if unset) | none |
 | `SKIP_UPDATE` | do not run SteamCMD (an install must exist) | off |
+| `FLUX_PROGRESS_SECONDS` | seconds between SteamCMD progress lines in the log | 30 |
 | `FLUX_STOP_GRACE` / `FLUX_RESTART_GRACE` | seconds a stop / a planned restart may take | 8 / 60 |
 | `FLUX_SNAPSHOT_MINUTES`, `FLUX_STOP_SNAPSHOT_SECONDS` | snapshot cadence, and how long a stop may spend on one | 5, 3 |
 | `FLUX_BACKUP_HOURS`, `FLUX_BACKUP_KEEP` | backup cadence and count | 6, 8 |
@@ -154,6 +155,7 @@ client** (none was available), so the image does not default to it: `SCUM_BATTLE
 
 ## Versions
 
+- 1.0.3 (2026-11-16): the download says what it is doing: a line when each SteamCMD attempt starts and its progress (`steam: attempt 2/5: downloading 41.2% (6.5 of 14.5 GB)`) every `FLUX_PROGRESS_SECONDS` (30) while the numbers change, also for the new-build install. The game's FIRST run on an install rewrote `ServerSettings.ini` with its own defaults within seconds (measured with the real game 2026-11-15: name, password and players lost, and never applied again because the env value had not changed); once per install, after the world loads, the settings that went back to the game's default are put back and the server starts again (`ini-pin` / `ini-recover`).
 - 1.0.2 (2026-11-11): the update never takes SteamCMD's "already up to date" on trust: when the installed buildid differs from the public one (as `app_info_print` names it), the appmanifest is set aside and the update runs again as a fresh install (found when a Steam update was not applied for hours and players got "your game version must match this server version").
 - 1.0.1: `db-guard` honours a restore (marker) and tells a failover, a split-brain and a stale/older snapshot apart; backup/restore temp dirs on the install volume; `backup` answers one JSON document and `force` skips the 60-minute rule (a `before...` label keeps the backup); new verbs `list-add`, `list-remove`, `gamelog`, `restore-mark`; `status` carries `imageVersion`, `verbs`, `capabilities`, `saveGuard`.
 - 1.0.0 (2026-10-29): first release. The game's own database copies and logs are pruned at every start (it deletes none); its logs are read as UTF-16LE.
