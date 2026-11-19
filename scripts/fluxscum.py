@@ -1256,18 +1256,21 @@ def make_backup(why, force=False):
         mins = int((time.time() - rows[0]["time"]) / 60)
         return ({"ok": False, "skipped": True, "error": f"The newest backup is only {mins} min old (a backup is skipped under {min_age // 60} min unless forced)."},
                 f"# backup skipped: the newest is {mins} min old")
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    # The name is reserved by creating its .part with O_EXCL, so two backups in the same second never share one.
-    while True:
-        name = time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-scum.tar.gz"
-        path = os.path.join(BACKUP_DIR, name)
-        if not os.path.exists(path):
-            try:
-                os.close(os.open(path + ".part", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
-                break
-            except FileExistsError:
-                pass
-        time.sleep(1)
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        # The name is reserved by creating its .part with O_EXCL, so two backups in the same second never share one.
+        while True:
+            name = time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-scum.tar.gz"
+            path = os.path.join(BACKUP_DIR, name)
+            if not os.path.exists(path):
+                try:
+                    os.close(os.open(path + ".part", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+                    break
+                except FileExistsError:
+                    pass
+            time.sleep(1)
+    except OSError as e:  # a full or unwritable backup folder is the panel's answer too, not a traceback
+        return {"ok": False, "error": f"The backup failed: {e}"}, f"# WARN backup failed: {e}"
     # The consistent copy of the database is made on the install volume (local): a multi-GB temp dir must
     # not land on the synchronised one. Only the finished .tar.gz.part goes to the backup folder.
     os.makedirs(SERVER_DIR, exist_ok=True)
@@ -1385,7 +1388,14 @@ def cmd_do_restore(_args):
         print(f"# WARN the backup to restore is gone: {name}")
         write_json(LAST_RESTORE_FILE, {"name": name, "ok": False, "error": "that backup is gone", "time": int(time.time())})
         return
-    print(make_backup(f"before restoring {name}", force=True)[1])
+    safety, note = make_backup(f"before restoring {name}", force=True)
+    print(note)
+    # A restore replaces the save on this node: without the safety copy of what is there it does not start
+    # (nothing is replaced, the server runs as it was). "Nothing saved yet" has nothing to protect.
+    if not safety.get("ok") and not safety.get("skipped"):
+        print(f"# WARN the restore of {name} was not done: the safety copy of the current save failed")
+        write_json(LAST_RESTORE_FILE, {"name": name, "ok": False, "error": "the safety copy of the current save could not be made, so nothing was replaced", "time": int(time.time())})
+        return
     if restore_backup_db({"name": name}, with_config=True):
         print(f"# restored {name}")
         write_json(LAST_RESTORE_FILE, {"name": name, "ok": True, "error": None, "time": int(time.time())})
