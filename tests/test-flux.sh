@@ -242,6 +242,16 @@ check "after a backup of what was there" "1" "$(scum backups | python3 -c 'impor
 check "and the restore says it worked" "True" "$(jget ok <"${data}/flux/last-restore.json")"
 check "the snapshot follows the restore" "4" "$(dbrows "${snap}")"
 
+# A restore whose safety copy cannot be made does not replace the save (the backup folder is unusable).
+mkdb "${live}" 6
+name="$(scum backups | jget backups.0.name)"
+scum restore "${name}" >/dev/null
+: >"${tmp}/notadir"
+scum FLUX_BACKUP_DIR="${tmp}/notadir/b" do-restore >/dev/null 2>&1
+check "no safety copy, no restore: the save on the node stays" "6" "$(dbrows "${live}")"
+check "and the restore says it did not happen" "False" "$(jget ok <"${data}/flux/last-restore.json")"
+check "a backup into an unusable folder answers ok false, not a traceback" "False" "$(scum FLUX_BACKUP_DIR="${tmp}/notadir/b" backup x force 2>/dev/null | jget ok)"
+
 # An imported save.
 mkdir -p "${data}/flux/uploads"
 mkdb "${data}/flux/uploads/up.db" 9
