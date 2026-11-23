@@ -60,6 +60,8 @@ if [ ! -f /tmp/.first-failed ]; then touch /tmp/.first-failed; echo "ERROR! Fail
 mkdir -p "${dir}/steamapps" "${dir}/SCUM/Binaries/Win64"
 : >"${dir}/SCUM/Binaries/Win64/SCUMServer.exe"
 acf="${dir}/steamapps/appmanifest_3792580.acf"
+# Like the real one on 2026-11-23 after a redeploy (depotcache gone): with a record present and the flag set, it fails with 0x6.
+if [ -f "${acf}" ] && [ -f /tmp/.stub-0x6 ]; then echo "Error! App '3792580' state is 0x6 after update job."; exit 8; fi
 # Like the real one on 2026-11-11: with a record present it says "up to date" whatever Steam's public build is.
 if [ -f "${acf}" ]; then echo "Success! App '3792580' already up to date."; exit 0; fi
 printf '"AppState"\n{\n\t"buildid"\t\t"%s"\n}\n' "$(cat /tmp/.public-build 2>/dev/null || echo 100)" >"${acf}"
@@ -213,7 +215,21 @@ flux-scum restart >/dev/null
 wait_for 'grep -c "flux-entrypoint starting" /tmp/entry.log | grep -q "^[3-9]"' 20
 sleep 3
 check "with the public build installed nothing is installed again" "0" "$(grep -c 'updating again as a fresh install' /tmp/entry.log | awk '{print ($1 > 1) ? 1 : 0}')"
-rm -f /tmp/.public-build
+
+# SteamCMD fails with "state is 0x6" (the depot manifests of the installed build are gone, the 2026-11-23
+# DEIMOS case): the record is set aside once and the build is installed as a new one.
+echo 300 >/tmp/.public-build
+touch /tmp/.stub-0x6
+: >/tmp/steamcmd-calls
+flux-scum restart >/dev/null
+check "a 0x6 failure ends in a fresh install of the public build" "0" "$(status wait_for 'grep -q "server build 300" /tmp/entry.log' 60)"
+check "the log says why" "1" "$(grep -c "no longer serves the installed build's manifests" /tmp/entry.log | awk '{print ($1 > 0) ? 1 : 0}')"
+check "the fresh install happens once" "2" "$(grep -c app_update /tmp/steamcmd-calls)"
+check "and the record is the new build's" "300" "$(awk -F'"' '$2 == "buildid" { print $4 }' "${srv}/steamapps/appmanifest_3792580.acf")"
+check "no set-aside copy of the record is left" "1" "$(status test -e "${srv}/steamapps/appmanifest_3792580.acf.pre-fresh")"
+check "the server is up again" "0" "$(status wait_for 'grep -q "\"running\"" ${data}/flux/state.json 2>/dev/null' 40)"
+check "SteamCMD's depotcache lives on the install volume" "${srv}/flux-steam/depotcache" "$(readlink /root/.local/share/Steam/depotcache)"
+rm -f /tmp/.public-build /tmp/.stub-0x6
 
 # A stop from Docker.
 wait_for 'grep -q "\"running\"" ${data}/flux/state.json' 20
