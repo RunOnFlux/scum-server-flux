@@ -65,6 +65,18 @@ mkdir -p "${s}" "${FLUX_STATE_DIR}" "${FLUX_GAME_LOG_DIR}"
 flux_log_migrate "${FLUX_STATE_DIR}/flux.log"
 flux_banner "SCUM"
 
+# SteamCMD's depotcache onto the INSTALL volume. It holds the manifests of the installed build, which
+# the NEXT update needs and which Steam refuses to an anonymous login once a build is old. In the
+# container's own layer they are lost on every redeploy, and the first update after it fails with
+# "state is 0x6 after update job" (see update_server). Local to the node, like the install, never synced.
+steam_home="${HOME:-/root}/.local/share/Steam"
+mkdir -p "${s}/flux-steam/depotcache" "${steam_home}"
+if [ ! -L "${steam_home}/depotcache" ]; then
+  [ -d "${steam_home}/depotcache" ] && cp -an "${steam_home}/depotcache/." "${s}/flux-steam/depotcache/" 2>/dev/null
+  rm -rf "${steam_home}/depotcache"
+  ln -s "${s}/flux-steam/depotcache" "${steam_home}/depotcache"
+fi
+
 if ! restart_at="$(flux_restart_time "${SCUM_RESTART_TIME:-}")"; then
   flux_log "WARN SCUM_RESTART_TIME='${SCUM_RESTART_TIME}' is not HH:MM; no daily restart"
   restart_at=""
@@ -188,6 +200,9 @@ update_server() {
   # No `validate` on the first attempt: it re-hashes the whole 3.4 GB install on every start. An
   # install that is actually broken fails the first attempt, and every retry validates.
   validate=""
+  local fresh=0 acf="${s}/steamapps/appmanifest_${FLUX_STEAM_APP}.acf"
+  # A stop in the middle of a fresh install leaves the old build's record only as .pre-fresh.
+  [ ! -f "${acf}" ] && [ -f "${acf}.pre-fresh" ] && [ -f "${s}/${FLUX_GAME_EXE}" ] && cp -f "${acf}.pre-fresh" "${acf}"
   for attempt in 1 2 3 4 5; do
     # app_info_update first: a fresh SteamCMD answers "Missing configuration" to the very first
     # app_update of this app (measured 2026-10-24) and stops; the next attempt works. That error is
@@ -197,18 +212,33 @@ update_server() {
     run_steamcmd /tmp/steamcmd.log "attempt ${attempt}/5:" ${validate}
     # "fully installed" after a download, "already up to date" otherwise.
     if [ -f "${s}/${FLUX_GAME_EXE}" ] && grep -qE "fully installed|already up to date" /tmp/steamcmd.log; then
+      rm -f "${acf}.pre-fresh"
       catch_up_build
       flux_log "server build $(flux_installed_build "${s}/steamapps/appmanifest_${FLUX_STEAM_APP}.acf")"
       return 0
     fi
     [ "${terminating}" = "1" ] && return 1
-    if ! grep -aq "Missing configuration" /tmp/steamcmd.log; then
+    if grep -aqE "state is 0x6( |$)" /tmp/steamcmd.log && [ "${fresh}" = "0" ] && [ -f "${acf}" ]; then
+      # An update from build A to B needs A's depot manifests (SteamCMD's depotcache, kept on this
+      # volume, see the top). When they are gone Steam will NOT hand an old manifest to an anonymous
+      # login, and neither retrying nor validate gets past it: only a fresh install over the top does
+      # (the changed files only, but a long download). Once, and only for "state is 0x6", never for a
+      # network failure, which a re-download cannot fix.
+      fresh=1
+      validate=""
+      [ -f "${acf}.pre-fresh" ] || cp -f "${acf}" "${acf}.pre-fresh"
+      rm -rf "${acf}" "${s}/steamapps/downloading" "${s}/steamapps/temp"
+      flux_log "WARN Steam no longer serves the installed build's manifests; updating as a new install"
+    elif ! grep -aq "Missing configuration" /tmp/steamcmd.log; then
       validate="validate"
     fi
     flux_log "WARN steamcmd failed (attempt ${attempt}/5): $(grep -aE 'ERROR|Error|error' /tmp/steamcmd.log | tail -2 | tr '\n' ' ')$([ "${attempt}" -lt 5 ] && echo "retrying in 5s${validate:+ with validate}" || echo "no more attempts")"
     sleep 5 &
     wait $!
   done
+  # The fresh install did not finish: put the old build's record back, so the update watch still
+  # knows which build is running.
+  [ "${fresh}" = "1" ] && [ -f "${acf}.pre-fresh" ] && cp -f "${acf}.pre-fresh" "${acf}"
   if [ -f "${s}/${FLUX_GAME_EXE}" ]; then
     flux_log "WARN could not update from Steam; starting the build already installed"
     return 0
